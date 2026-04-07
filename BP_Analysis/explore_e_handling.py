@@ -35,6 +35,11 @@ def build_estimator() -> Pipeline:
 
 def add_e_features(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
+    if "M3_Phi" in work.columns:
+        if "M3_sinPhi" not in work.columns:
+            work["M3_sinPhi"] = np.sin(work["M3_Phi"].astype(float))
+        if "M3_cosPhi" not in work.columns:
+            work["M3_cosPhi"] = np.cos(work["M3_Phi"].astype(float))
     a = work["M1_A"].astype(float)
     hr = work["M1_HR"].astype(float)
     rise = work["M1_V2P_relTTP"].astype(float)
@@ -68,7 +73,7 @@ def method_specs() -> dict[str, dict]:
     base = ["M1_A", "M1_HR", "M1_V2P_relTTP", "M1_P2V_relTTP"]
     specs: dict[str, dict] = {
         "RTBP": {"cols": base, "needs_e": False, "family": "reference"},
-        "sinBP_M": {"cols": ["M3_A", "M3_HR", "M3_Mean", "M3_Phi"], "needs_e": False, "family": "reference"},
+        "sinBP_M": {"cols": ["M3_A", "M3_HR", "M3_Mean", "M3_sinPhi", "M3_cosPhi"], "needs_e": False, "family": "reference"},
         "sinBP_D_current": {
             "cols": ["M2_A", "M2_HR", "M2_V2P_relTTP", "M2_P2V_relTTP", "M2_E"],
             "needs_e": True,

@@ -42,7 +42,7 @@ class MethodSpec:
 
 METHODS = [
     MethodSpec("RTBP", ("M1_A", "M1_HR", "M1_V2P_relTTP", "M1_P2V_relTTP")),
-    MethodSpec("SinBP_M", ("M3_A", "M3_HR", "M3_Mean", "M3_Phi")),
+    MethodSpec("SinBP_M", ("M3_A", "M3_HR", "M3_Mean", "M3_sinPhi", "M3_cosPhi")),
     MethodSpec("SinBP_D_full", ("M2_A", "M2_HR", "M2_V2P_relTTP", "M2_P2V_relTTP", "M2_Stiffness", "M2_E")),
     MethodSpec("SinBP_D_no_stiffness", ("M2_A", "M2_HR", "M2_V2P_relTTP", "M2_P2V_relTTP", "M2_E")),
     MethodSpec("SinBP_D_E_only", ("M2_E",)),
@@ -108,6 +108,12 @@ def eval_config(
     estimator_kind: str,
     window_seconds: float,
 ) -> dict:
+    if "M3_Phi" in df.columns:
+        df = df.copy()
+        if "M3_sinPhi" not in df.columns:
+            df["M3_sinPhi"] = np.sin(df["M3_Phi"].astype(float))
+        if "M3_cosPhi" not in df.columns:
+            df["M3_cosPhi"] = np.cos(df["M3_Phi"].astype(float))
     feature_cols = [c for c in method.feature_cols if c in df.columns]
     if len(feature_cols) != len(method.feature_cols):
         return {"status": "missing_features"}

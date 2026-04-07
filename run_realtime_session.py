@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import os
 from pathlib import Path
 import signal
@@ -14,6 +15,7 @@ from realtime_pipeline.android_bridge import (
     AndroidLogcatMonitor,
     clear_logcat,
     ensure_device_ready,
+    list_remote_session_files,
     phone_is_ready,
     pull_session_files,
     start_session,
@@ -84,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-number", type=int, default=1)
     parser.add_argument("--mode", type=int, default=1)
     parser.add_argument("--session-id", default="")
+    parser.add_argument("--recover-session-id", default="")
     return parser
 
 
@@ -124,14 +127,30 @@ def render_combined_event(phone: AndroidBeatEvent, cnap: CNAPBeatEvent | None) -
     rtbp = phone.rtbp
     sin_d = phone.sinbp_d
     sin_m = phone.sinbp_m
+    dt_s = (
+        (phone.timestamp_ms - float(cnap.timestamp_ms)) / 1000.0
+        if cnap.timestamp_ms is not None and phone.timestamp_ms > 0
+        else phone.elapsed_time_s - cnap.elapsed_time_s
+    )
     return (
         f"[sync ] t_phone={phone.elapsed_time_s:6.2f}s beat={phone.beat_index:03d} "
         f"CNAP={cnap.systolic:6.1f}/{cnap.diastolic:5.1f} "
         f"RTBP={rtbp.get('sbp', 0):6.1f}/{rtbp.get('dbp', 0):5.1f} "
         f"SinD={sin_d.get('sbp', 0):6.1f}/{sin_d.get('dbp', 0):5.1f} "
         f"SinM={sin_m.get('sbp', 0):6.1f}/{sin_m.get('dbp', 0):5.1f} "
-        f"dt={phone.elapsed_time_s - cnap.elapsed_time_s:+5.2f}s"
+        f"dt={dt_s:+5.2f}s"
     )
+
+
+def select_nearest_cnap(phone: AndroidBeatEvent, cnap_events: deque[CNAPBeatEvent]) -> CNAPBeatEvent | None:
+    if not cnap_events:
+        return None
+    if phone.timestamp_ms <= 0:
+        return cnap_events[-1]
+    candidates = [event for event in cnap_events if event.timestamp_ms is not None]
+    if not candidates:
+        return cnap_events[-1]
+    return min(candidates, key=lambda event: abs(phone.timestamp_ms - float(event.timestamp_ms)))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -144,19 +163,53 @@ def main(argv: list[str] | None = None) -> int:
     if not phone_ok:
         print(f"phone check failed: {phone_status}")
         return 1
-    if not cnap_ok:
+    if not args.recover_session_id and not cnap_ok:
         print(f"cnap check failed: {cnap_status}")
         return 1
 
-    subject_id = prompt_if_missing(args.subject_id, "subject_id")
-    session_number = int(prompt_if_missing(str(args.session_number), "session_number", str(args.session_number)))
-    default_session_id = args.session_id or f"{subject_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    session_id = prompt_if_missing(args.session_id, "session_id", default_session_id)
+    if args.recover_session_id:
+        session_id = args.recover_session_id.strip()
+        subject_id = args.subject_id or session_id.split("_")[0]
+        session_number = args.session_number
+    else:
+        subject_id = prompt_if_missing(args.subject_id, "subject_id")
+        session_number = int(prompt_if_missing(str(args.session_number), "session_number", str(args.session_number)))
+        default_session_id = args.session_id or f"{subject_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        session_id = prompt_if_missing(args.session_id, "session_id", default_session_id)
 
     session_root = repo_root / "Analysis" / "Data" / "realtime_sessions" / session_id
     smartphone_dir = session_root / "smartphone"
     merged_csv = session_root / f"{session_id}_merged.csv"
     eval_dir = session_root / "evaluation"
+
+    if args.recover_session_id:
+        pulled = pull_session_files(session_id, smartphone_dir)
+        training_csv = smartphone_dir / f"{session_id}_Training_Data.csv"
+        if training_csv not in pulled and not training_csv.exists():
+            remote_files = list_remote_session_files(session_id)
+            print(
+                "recover failed: smartphone training csv was not pulled.\n"
+                f"expected: {training_csv}\n"
+                "available remote files:\n"
+                + ("\n".join(f"  {path}" for path in remote_files) if remote_files else "  (none)")
+            )
+            return 1
+        cnap_beats_csv = repo_root / "Analysis" / "Data" / "pdp" / "realtime_aux" / session_id / f"{session_id}_beats.csv"
+        if not cnap_beats_csv.exists():
+            print(f"recover failed: CNAP beats csv was not found: {cnap_beats_csv}")
+            return 1
+        merged_df = merge_session_data(training_csv, cnap_beats_csv, merged_csv)
+        summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
+        summary_df = pd.read_csv(summary_csv)
+        plot_paths = generate_session_plots(merged_df, eval_dir)
+        report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
+        print(f"recovered smartphone files -> {smartphone_dir}")
+        print(f"cnap beats -> {cnap_beats_csv}")
+        print(f"merged csv -> {merged_csv}")
+        print(f"evaluation summary -> {summary_csv}")
+        print(f"evaluation json -> {summary_json}")
+        print(f"session report -> {report_path}")
+        return 0
 
     try:
         ensure_device_ready()
@@ -166,18 +219,17 @@ def main(argv: list[str] | None = None) -> int:
 
         cnap = start_cnap_capture(repo_root, session_id)
         start_session(session_id=session_id, subject_id=subject_id, session_number=session_number, mode=args.mode)
-        latest_cnap: CNAPBeatEvent | None = None
+        recent_cnap: deque[CNAPBeatEvent] = deque(maxlen=64)
 
         print(f"session_id={session_id}")
         print("recording started. Press Ctrl+C to stop.")
 
         while True:
             def on_cnap(event: CNAPBeatEvent) -> None:
-                nonlocal latest_cnap
-                latest_cnap = event
+                recent_cnap.append(event)
 
             def on_phone(event: AndroidBeatEvent) -> None:
-                print(render_combined_event(event, latest_cnap), flush=True)
+                print(render_combined_event(event, select_nearest_cnap(event, recent_cnap)), flush=True)
 
             cnap.drain(on_cnap)
             monitor.drain(on_phone)
@@ -188,21 +240,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"session failed: {exc}")
         return 1
 
-    stop_session()
-    time.sleep(4.0)
+    for _ in range(2):
+        try:
+            stop_session(session_id)
+        except Exception:
+            pass
+        time.sleep(2.0)
     cnap.stop()
-    monitor.drain(lambda event: print(render_combined_event(event, latest_cnap), flush=True))
+    monitor.drain(lambda event: print(render_combined_event(event, select_nearest_cnap(event, recent_cnap)), flush=True))
     monitor.stop()
 
     pulled = pull_session_files(session_id, smartphone_dir)
     training_csv = smartphone_dir / f"{session_id}_Training_Data.csv"
     if training_csv not in pulled and not training_csv.exists():
+        remote_files = list_remote_session_files(session_id)
         print(
             "session stopped, but smartphone training csv was not pulled.\n"
             f"expected: {training_csv}\n"
             "checked remote paths:\n"
             f"  /sdcard/Download/{session_id}_Training_Data.csv\n"
-            f"  /sdcard/Download/PC_Sync/Analysis/Data/Smartphone/{session_id}/{session_id}_Training_Data.csv"
+            f"  /sdcard/Download/PC_Sync/Analysis/Data/Smartphone/{session_id}/{session_id}_Training_Data.csv\n"
+            "available remote files:\n"
+            + ("\n".join(f"  {path}" for path in remote_files) if remote_files else "  (none)")
         )
         return 1
     if not cnap.beats_csv.exists():

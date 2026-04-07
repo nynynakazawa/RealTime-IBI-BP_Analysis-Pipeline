@@ -30,6 +30,10 @@ class AndroidBeatEvent:
         return float(self.raw.get("elapsed_time_s", 0.0))
 
     @property
+    def timestamp_ms(self) -> float:
+        return float(self.raw.get("timestamp_ms", 0.0))
+
+    @property
     def rtbp(self) -> dict:
         return dict(self.raw.get("rtbp", {}))
 
@@ -124,16 +128,45 @@ def start_session(session_id: str, subject_id: str, session_number: int, mode: i
     )
 
 
-def stop_session() -> None:
-    run_adb(
+def stop_session(session_id: str = "") -> None:
+    cmd = [
         "shell",
         "am",
         "start",
+        "-W",
         "-n",
         ACTIVITY_NAME,
         "-a",
         ACTION_STOP,
-    )
+    ]
+    if session_id:
+        cmd.extend(["--es", "session_id", session_id])
+    run_adb(*cmd)
+
+
+def list_remote_session_files(session_id: str) -> list[str]:
+    remote_dirs = [
+        "/sdcard/Download",
+        f"/sdcard/Download/PC_Sync/Analysis/Data/Smartphone/{session_id}",
+    ]
+    found: list[str] = []
+    seen: set[str] = set()
+    for remote_dir in remote_dirs:
+        shell_cmd = (
+            f'for f in "{remote_dir}/{session_id}"*.csv; do '
+            'if [ -f "$f" ]; then printf "%s\\n" "$f"; fi; '
+            "done"
+        )
+        result = run_adb("shell", "sh", "-c", shell_cmd, check=False)
+        for line in ((result.stdout or "") + (result.stderr or "")).splitlines():
+            candidate = line.strip()
+            if not candidate.startswith("/"):
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            found.append(candidate)
+    return found
 
 
 class AndroidLogcatMonitor:
@@ -205,7 +238,7 @@ def pull_session_files(session_id: str, destination_dir: Path) -> list[Path]:
         f"/sdcard/Download/PC_Sync/Analysis/Data/Smartphone/{session_id}",
     ]
     pulled: list[Path] = []
-    for _ in range(8):
+    for _ in range(12):
         pulled.clear()
         for suffix in suffixes:
             local_path = destination_dir / f"{session_id}{suffix}"
@@ -217,6 +250,12 @@ def pull_session_files(session_id: str, destination_dir: Path) -> list[Path]:
                 if result.returncode == 0 and local_path.exists():
                     pulled.append(local_path)
                     break
+        if not any(path.name.endswith("_Training_Data.csv") for path in pulled):
+            for remote_path in list_remote_session_files(session_id):
+                local_path = destination_dir / Path(remote_path).name
+                result = run_adb("pull", remote_path, str(local_path), check=False)
+                if result.returncode == 0 and local_path.exists():
+                    pulled.append(local_path)
         if any(path.name.endswith("_Training_Data.csv") for path in pulled):
             break
         time.sleep(1.0)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import os
 import re
 import signal
@@ -13,6 +14,7 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class CNAPBeatEvent:
+    timestamp_ms: float | None
     elapsed_time_s: float
     beat_index: int
     systolic: float
@@ -63,7 +65,7 @@ class CNAPCapture:
 def _pump_output(process: subprocess.Popen[str], queue: Queue[CNAPBeatEvent], stop: threading.Event) -> None:
     assert process.stdout is not None
     pattern = re.compile(
-        r"\[beat\].*t=(?P<elapsed>[0-9.]+)s #(?P<beat>\d+).*"
+        r"\[beat\].*now=(?P<now>\S+)\s+t=(?P<elapsed>[0-9.]+)s #(?P<beat>\d+).*"
         r"Sys=(?P<sys>[0-9.]+).*Mean=(?P<mean>[0-9.]+).*Dia=(?P<dia>[0-9.]+).*HR=(?P<hr>[0-9.]+)"
     )
     for line in process.stdout:
@@ -72,8 +74,14 @@ def _pump_output(process: subprocess.Popen[str], queue: Queue[CNAPBeatEvent], st
         match = pattern.search(line)
         if not match:
             continue
+        timestamp_ms = None
+        try:
+            timestamp_ms = datetime.fromisoformat(match.group("now")).timestamp() * 1000.0
+        except ValueError:
+            timestamp_ms = None
         queue.put(
             CNAPBeatEvent(
+                timestamp_ms=timestamp_ms,
                 elapsed_time_s=float(match.group("elapsed")),
                 beat_index=int(match.group("beat")),
                 systolic=float(match.group("sys")),

@@ -872,13 +872,19 @@ def main():
         print("Warning: 時間情報のカラムが見つからないためウィンドウ集計を無効化します。")
         args.window_seconds = 0.0
 
+    if "M3_Phi" in df_valid.columns:
+        if "M3_sinPhi" not in df_valid.columns:
+            df_valid["M3_sinPhi"] = np.sin(df_valid["M3_Phi"].astype(float))
+        if "M3_cosPhi" not in df_valid.columns:
+            df_valid["M3_cosPhi"] = np.cos(df_valid["M3_Phi"].astype(float))
+
     # 各手法の特徴量定義
     # RealTimeBP: correctedGreenValueから直接推定
     realtimebp_features = ["M1_A", "M1_HR", "M1_V2P_relTTP", "M1_P2V_relTTP"]
     # SinBP_D: PPTX/Androidロジックに合わせて RTBP features + residual E
     sinbp_d_features = ["M2_A", "M2_HR", "M2_V2P_relTTP", "M2_P2V_relTTP", "M2_E"]
-    # SinBP_M: Sin波自体をモデルとして算出
-    sinbp_m_features = ["M3_A", "M3_HR", "M3_Mean", "M3_Phi"]
+    # SinBP_M: 位相の円周性を保つため、Phi は sin/cos 展開して使用
+    sinbp_m_features = ["M3_A", "M3_HR", "M3_Mean", "M3_sinPhi", "M3_cosPhi"]
 
     # 特徴量が存在するかチェック
     available_features = set(df_valid.columns)

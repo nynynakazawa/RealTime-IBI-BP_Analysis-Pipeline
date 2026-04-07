@@ -63,6 +63,15 @@ def evaluate_method(df, feature_cols, target_col, coefficients, intercept, metho
         return None
     
     # データの準備
+    if "M3_Phi" in df.columns:
+        if "M3_sinPhi" in feature_cols and "M3_sinPhi" not in df.columns:
+            df = df.copy()
+            df["M3_sinPhi"] = np.sin(df["M3_Phi"].astype(float))
+        if "M3_cosPhi" in feature_cols and "M3_cosPhi" not in df.columns:
+            if "M3_sinPhi" not in df.columns:
+                df = df.copy()
+            df["M3_cosPhi"] = np.cos(df["M3_Phi"].astype(float))
+
     X = df[feature_cols].values
     y_true = df[target_col].values
     
@@ -186,4 +195,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

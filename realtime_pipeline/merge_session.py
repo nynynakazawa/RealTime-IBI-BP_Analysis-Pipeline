@@ -64,6 +64,9 @@ def merge_session_data(
         tolerance=tolerance_ms,
     )
     merged["time_delta_ms"] = merged["timestamp_ms"] - merged["cnap_timestamp_ms"]
+    merged["abs_time_delta_ms"] = merged["time_delta_ms"].abs()
+    if "計測回数" in merged.columns:
+        merged["matched_cnap_beat_index"] = pd.to_numeric(merged["計測回数"], errors="coerce")
     merged["ref_SBP"] = merged["Beat Sys [mmHg]"]
     merged["ref_DBP"] = merged["Beat Dia [mmHg]"]
     merged_csv.parent.mkdir(parents=True, exist_ok=True)
