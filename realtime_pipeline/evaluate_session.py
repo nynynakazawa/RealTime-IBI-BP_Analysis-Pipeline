@@ -16,6 +16,14 @@ METHOD_COLUMNS = {
     "SinBP_M": ("M3_SBP", "M3_DBP"),
 }
 
+METHOD_META_COLUMNS = {
+    "RTBP": ("M1_output_valid", "M1_reject_reason"),
+    "SinBP_D": ("M2_output_valid", "M2_reject_reason"),
+    "SinBP_M": ("M3_output_valid", "M3_reject_reason"),
+}
+
+MAX_ABS_TIME_DELTA_MS = 350.0
+
 
 def _markdown_table(df: pd.DataFrame) -> str:
     try:
@@ -38,9 +46,50 @@ def _corr(a: pd.Series, b: pd.Series) -> float:
     return float(np.corrcoef(a.to_numpy(), b.to_numpy())[0, 1])
 
 
+def _coerce_bool_series(series: pd.Series) -> pd.Series:
+    text = series.astype(str).str.strip().str.lower()
+    return text.isin({"1", "true", "yes", "y", "ok"})
+
+
+def build_filtered_view(merged_df: pd.DataFrame) -> pd.DataFrame:
+    filtered = merged_df.copy()
+    base_mask = pd.Series(True, index=filtered.index)
+
+    if "abs_time_delta_ms" in filtered.columns:
+        abs_dt = pd.to_numeric(filtered["abs_time_delta_ms"], errors="coerce")
+        base_mask &= abs_dt.notna() & (abs_dt <= MAX_ABS_TIME_DELTA_MS)
+
+    if "artifact_flag" in filtered.columns:
+        artifact = pd.to_numeric(filtered["artifact_flag"], errors="coerce").fillna(0)
+        base_mask &= artifact == 0
+
+    if "is_valid_beat" in filtered.columns:
+        valid_beat = _coerce_bool_series(filtered["is_valid_beat"])
+        base_mask &= valid_beat
+
+    for method_name, (sbp_col, dbp_col) in METHOD_COLUMNS.items():
+        method_mask = base_mask.copy()
+        output_valid_col, reject_reason_col = METHOD_META_COLUMNS[method_name]
+
+        if output_valid_col in filtered.columns:
+            method_mask &= _coerce_bool_series(filtered[output_valid_col])
+
+        if reject_reason_col in filtered.columns:
+            reject_reason = filtered[reject_reason_col].fillna("").astype(str).str.strip().str.lower()
+            method_mask &= reject_reason.isin({"", "ok"})
+
+        filtered[f"eval_include_{method_name}"] = method_mask.astype(int)
+        filtered.loc[~method_mask, [sbp_col, dbp_col]] = np.nan
+
+    return filtered
+
+
 def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    valid = merged_df.dropna(subset=["ref_SBP", "ref_DBP"]).copy()
+    filtered = build_filtered_view(merged_df)
+    filtered_csv = output_dir / "session_evaluation_input_filtered.csv"
+    filtered.to_csv(filtered_csv, index=False)
+    valid = filtered.dropna(subset=["ref_SBP", "ref_DBP"]).copy()
     rows: list[dict] = []
     for method_name, (sbp_col, dbp_col) in METHOD_COLUMNS.items():
         for target_label, ref_col, pred_col in (
@@ -51,13 +100,14 @@ def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[
             if subset.empty:
                 rows.append(
                     {
-                        "method": method_name,
-                        "target": target_label,
-                        "n": 0,
-                        "mae": np.nan,
-                        "rmse": np.nan,
-                        "corr": np.nan,
-                    }
+                    "method": method_name,
+                    "target": target_label,
+                    "filters": f"abs_time_delta_ms<={MAX_ABS_TIME_DELTA_MS}, output_valid, reject_reason=ok, artifact_flag=0",
+                    "n": 0,
+                    "mae": np.nan,
+                    "rmse": np.nan,
+                    "corr": np.nan,
+                }
                 )
                 continue
             error = subset[pred_col] - subset[ref_col]
@@ -65,6 +115,7 @@ def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[
                 {
                     "method": method_name,
                     "target": target_label,
+                    "filters": f"abs_time_delta_ms<={MAX_ABS_TIME_DELTA_MS}, output_valid, reject_reason=ok, artifact_flag=0",
                     "n": int(len(subset)),
                     "mae": float(np.abs(error).mean()),
                     "rmse": float(np.sqrt((error ** 2).mean())),
@@ -84,7 +135,7 @@ def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[
 
 def generate_session_plots(merged_df: pd.DataFrame, output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    valid = merged_df.dropna(subset=["ref_SBP", "ref_DBP"]).copy()
+    valid = build_filtered_view(merged_df).dropna(subset=["ref_SBP", "ref_DBP"]).copy()
     if valid.empty:
         return []
     if "経過時間_秒" not in valid.columns:
@@ -129,6 +180,7 @@ def write_session_report(
         "",
         f"- samples_with_reference: {len(valid)}",
         f"- total_samples: {len(merged_df)}",
+        f"- evaluation_filters: abs_time_delta_ms<={MAX_ABS_TIME_DELTA_MS}, output_valid=true, reject_reason=ok, artifact_flag=0",
         "",
         "## Metrics",
         "",

@@ -1,0 +1,7 @@
+method,target,filters,n,mae,rmse,corr
+RTBP,SBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",279,11.595557375347669,13.21398044451716,-0.19558583700361248
+RTBP,DBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",279,6.170309263555556,8.697824978461991,0.13198001506520946
+SinBP_D,SBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",256,15.10801340238672,17.01197154525213,-0.1212125093442909
+SinBP_D,DBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",256,11.912926174835938,13.954444556875462,0.07412444048641945
+SinBP_M,SBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",256,5.644539359277345,7.559804956044351,-0.1546335671328617
+SinBP_M,DBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",256,5.205023589664062,6.6830194961150005,0.08883382456194554
