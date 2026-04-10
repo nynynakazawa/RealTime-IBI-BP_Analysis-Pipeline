@@ -1,7 +1,0 @@
-method,target,filters,n,mae,rmse,corr
-RTBP,SBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",174,6.5087044429137935,8.213225054327602,0.033631355810674286
-RTBP,DBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",174,6.187668344672414,9.151225128557194,-0.041719109563370424
-SinBP_D,SBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",161,9.724400108403726,12.700180726240557,0.09077418763541568
-SinBP_D,DBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",161,12.154670395565217,14.57412131693274,-0.10471487680385898
-SinBP_M,SBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",157,6.220813553719744,7.31366134709348,0.04361788874300864
-SinBP_M,DBP,"abs_time_delta_ms<=350.0, output_valid, reject_reason=ok, artifact_flag=0",157,4.271724896509554,5.058236810815354,0.014428811187006861

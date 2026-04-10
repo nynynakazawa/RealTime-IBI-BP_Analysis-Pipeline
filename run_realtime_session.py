@@ -22,6 +22,7 @@ from realtime_pipeline.android_bridge import (
     stop_session,
 )
 from realtime_pipeline.cnap_bridge import CNAPBeatEvent, cnap_is_ready, start_cnap_capture
+from realtime_pipeline.cnap_bridge import resolve_cnap_beats_csv
 from realtime_pipeline.evaluate_session import (
     evaluate_merged_session,
     generate_session_plots,
@@ -194,9 +195,10 @@ def main(argv: list[str] | None = None) -> int:
                 + ("\n".join(f"  {path}" for path in remote_files) if remote_files else "  (none)")
             )
             return 1
-        cnap_beats_csv = repo_root / "Analysis" / "Data" / "pdp" / "realtime_aux" / session_id / f"{session_id}_beats.csv"
-        if not cnap_beats_csv.exists():
-            print(f"recover failed: CNAP beats csv was not found: {cnap_beats_csv}")
+        cnap_beats_csv = resolve_cnap_beats_csv(repo_root, session_id)
+        if cnap_beats_csv is None:
+            expected = repo_root / "Analysis" / "Data" / "pdp" / "realtime_aux" / session_id / f"{session_id}_beats.csv"
+            print(f"recover failed: CNAP beats csv was not found: {expected}")
             return 1
         merged_df = merge_session_data(training_csv, cnap_beats_csv, merged_csv)
         summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
@@ -220,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         cnap = start_cnap_capture(repo_root, session_id)
         start_session(session_id=session_id, subject_id=subject_id, session_number=session_number, mode=args.mode)
         recent_cnap: deque[CNAPBeatEvent] = deque(maxlen=64)
+        all_cnap: list[CNAPBeatEvent] = []
 
         print(f"session_id={session_id}")
         print("recording started. Press Ctrl+C to stop.")
@@ -227,12 +230,18 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             def on_cnap(event: CNAPBeatEvent) -> None:
                 recent_cnap.append(event)
+                all_cnap.append(event)
 
             def on_phone(event: AndroidBeatEvent) -> None:
                 print(render_combined_event(event, select_nearest_cnap(event, recent_cnap)), flush=True)
 
             cnap.drain(on_cnap)
             monitor.drain(on_phone)
+            if cnap.process.poll() is not None and not all_cnap:
+                raise RuntimeError(
+                    "CNAP capture exited before producing beats.\n"
+                    + cnap.diagnostic_summary()
+                )
             time.sleep(0.2)
     except KeyboardInterrupt:
         print("\nstopping...")
@@ -247,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             pass
         time.sleep(2.0)
     cnap.stop()
+    cnap.drain(lambda event: all_cnap.append(event))
     monitor.drain(lambda event: print(render_combined_event(event, select_nearest_cnap(event, recent_cnap)), flush=True))
     monitor.stop()
 
@@ -264,18 +274,22 @@ def main(argv: list[str] | None = None) -> int:
             + ("\n".join(f"  {path}" for path in remote_files) if remote_files else "  (none)")
         )
         return 1
-    if not cnap.beats_csv.exists():
-        print(f"session stopped, but CNAP beats csv was not created: {cnap.beats_csv}")
+    cnap_beats_csv = resolve_cnap_beats_csv(repo_root, session_id, fallback_events=all_cnap)
+    if cnap_beats_csv is None:
+        print(
+            f"session stopped, but CNAP beats csv was not created: {cnap.beats_csv}\n"
+            + cnap.diagnostic_summary()
+        )
         return 1
 
-    merged_df = merge_session_data(training_csv, cnap.beats_csv, merged_csv)
+    merged_df = merge_session_data(training_csv, cnap_beats_csv, merged_csv)
     summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
     summary_df = pd.read_csv(summary_csv)
     plot_paths = generate_session_plots(merged_df, eval_dir)
     report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
 
     print(f"pulled smartphone files -> {smartphone_dir}")
-    print(f"cnap beats -> {cnap.beats_csv}")
+    print(f"cnap beats -> {cnap_beats_csv}")
     print(f"merged csv -> {merged_csv}")
     print(f"evaluation summary -> {summary_csv}")
     print(f"evaluation json -> {summary_json}")

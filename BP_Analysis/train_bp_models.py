@@ -881,8 +881,9 @@ def main():
     # 各手法の特徴量定義
     # RealTimeBP: correctedGreenValueから直接推定
     realtimebp_features = ["M1_A", "M1_HR", "M1_V2P_relTTP", "M1_P2V_relTTP"]
-    # SinBP_D: PPTX/Androidロジックに合わせて RTBP features + residual E
-    sinbp_d_features = ["M2_A", "M2_HR", "M2_V2P_relTTP", "M2_P2V_relTTP", "M2_E"]
+    # SinBP_D: RTBP を第1段の base とし、第2段で Stiffness_sin=E√A と E を使って残差補正する。
+    # そのため学習側も [A, HR, V2P_relTTP, P2V_relTTP, Stiffness, E] を使う。
+    sinbp_d_features = ["M2_A", "M2_HR", "M2_V2P_relTTP", "M2_P2V_relTTP", "M2_Stiffness", "M2_E"]
     # SinBP_M: 位相の円周性を保つため、Phi は sin/cos 展開して使用
     sinbp_m_features = ["M3_A", "M3_HR", "M3_Mean", "M3_sinPhi", "M3_cosPhi"]
 
