@@ -68,6 +68,32 @@ METHOD_SPECS = (
     },
 )
 
+BASELINE_EXPORT_SPECS = tuple(
+    {
+        "name": f"{method_name}_{series}",
+        "prefix": f"{prefix}_{series}",
+        "sbp_col": f"{prefix}_{series}_SBP",
+        "dbp_col": f"{prefix}_{series}_DBP",
+        "valid_col": f"{prefix}_{series}_output_valid",
+        "reject_col": f"{prefix}_{series}_reject_reason",
+        "calibration_key": calibration_key,
+        "already_smoothed": True,
+    }
+    for method_name, prefix, calibration_key in (
+        ("RTBP", "M1", "RTBP"),
+        ("SinBP_D", "M2", "SinBP_D"),
+        ("SinBP_M", "M3", "SinBP_M"),
+    )
+    for series in (
+        "INITIAL_BASELINE",
+        "RICH_BASELINE",
+        "SHARED_D_BASELINE",
+        "RICH_DYNAMIC",
+    )
+)
+
+METHOD_SPECS = METHOD_SPECS + BASELINE_EXPORT_SPECS
+
 PLOT_SERIES = "smoothed"
 
 MAX_ABS_TIME_DELTA_MS = 350.0
@@ -200,20 +226,64 @@ def _derive_postprocessed_columns(
     return enriched
 
 
+def _ensure_identity_postprocessed_columns(
+    df: pd.DataFrame,
+    prefix: str,
+    sbp_col: str,
+    dbp_col: str,
+    valid_col: str,
+    reject_col: str,
+) -> pd.DataFrame:
+    enriched = df.copy()
+    output_valid = enriched[valid_col].fillna(0).astype(float) == 1.0
+    reject_ok = enriched[reject_col].fillna("missing").astype(str).str.strip() == "ok"
+    valid = output_valid & reject_ok
+    sbp = pd.to_numeric(enriched[sbp_col], errors="coerce")
+    dbp = pd.to_numeric(enriched[dbp_col], errors="coerce")
+    map_value = (sbp + 2.0 * dbp) / 3.0
+    pp_value = sbp - dbp
+    sbp_valid = sbp.where(valid)
+    dbp_valid = dbp.where(valid)
+    map_valid = map_value.where(valid)
+    pp_valid = pp_value.where(valid)
+    enriched[f"{prefix}_MAP_raw"] = map_valid
+    enriched[f"{prefix}_PP_raw"] = pp_valid
+    enriched[f"{prefix}_MAP_smoothed"] = map_valid
+    enriched[f"{prefix}_PP_smoothed"] = pp_valid
+    enriched[f"{prefix}_MAP_calibrated"] = map_valid
+    enriched[f"{prefix}_PP_calibrated"] = pp_valid
+    enriched[f"{prefix}_SBP_smoothed"] = sbp_valid
+    enriched[f"{prefix}_DBP_smoothed"] = dbp_valid
+    enriched[f"{prefix}_SBP_calibrated"] = sbp_valid
+    enriched[f"{prefix}_DBP_calibrated"] = dbp_valid
+    enriched[f"{prefix}_postprocess_applied"] = valid.astype(int)
+    return enriched
+
+
 def ensure_postprocessed_columns(merged_df: pd.DataFrame) -> pd.DataFrame:
     enriched = merged_df.copy()
     for spec in METHOD_SPECS:
         required = {spec["sbp_col"], spec["dbp_col"], spec["valid_col"], spec["reject_col"]}
         if required.issubset(set(enriched.columns)):
-            enriched = _derive_postprocessed_columns(
-                enriched,
-                spec["calibration_key"],
-                spec["prefix"],
-                spec["sbp_col"],
-                spec["dbp_col"],
-                spec["valid_col"],
-                spec["reject_col"],
-            )
+            if spec.get("already_smoothed"):
+                enriched = _ensure_identity_postprocessed_columns(
+                    enriched,
+                    spec["prefix"],
+                    spec["sbp_col"],
+                    spec["dbp_col"],
+                    spec["valid_col"],
+                    spec["reject_col"],
+                )
+            else:
+                enriched = _derive_postprocessed_columns(
+                    enriched,
+                    spec["calibration_key"],
+                    spec["prefix"],
+                    spec["sbp_col"],
+                    spec["dbp_col"],
+                    spec["valid_col"],
+                    spec["reject_col"],
+                )
     return enriched
 
 
