@@ -1,3 +1,6 @@
 __pycache__/
 *.py[cod]
+.DS_Store
+!README.md
+!**/README.md
 BP_Analysis/results/realtime_map_pp_fit_*/
