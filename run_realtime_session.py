@@ -28,6 +28,7 @@ from realtime_pipeline.evaluate_session import (
     generate_session_plots,
     write_session_report,
 )
+from realtime_pipeline.experimental_repair import repair_session_experimental_outputs
 from realtime_pipeline.merge_session import merge_session_data
 import pandas as pd
 
@@ -88,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", type=int, default=1)
     parser.add_argument("--session-id", default="")
     parser.add_argument("--recover-session-id", default="")
+    parser.add_argument("--repair-existing-experimental", action="store_true")
+    parser.add_argument("--repair-target-session", default="")
+    parser.add_argument("--rerun-existing-evaluations", action="store_true")
     return parser
 
 
@@ -158,6 +162,52 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     kill_stale_session_processes(os.getpid())
     repo_root = Path(__file__).resolve().parent.parent
+    sessions_root = repo_root / "Analysis" / "Data" / "realtime_sessions"
+
+    if args.repair_existing_experimental:
+        target_sessions = {args.repair_target_session.strip()} if args.repair_target_session.strip() else None
+        artifacts = repair_session_experimental_outputs(sessions_root, target_sessions=target_sessions)
+        if not artifacts:
+            print("no sessions were repaired")
+            return 1
+        print(f"repaired experimental summaries: {len(artifacts)}")
+        for artifact in artifacts:
+            print(f"experimental summary -> {artifact.summary_csv}")
+            print(f"experimental json -> {artifact.summary_json}")
+            print(f"experimental predictions -> {artifact.predictions_csv}")
+        return 0
+
+    if args.rerun_existing_evaluations:
+        target_session = args.repair_target_session.strip()
+        session_dirs = sorted(path for path in sessions_root.iterdir() if path.is_dir())
+        rerun_count = 0
+        repaired_count = 0
+        for session_dir in session_dirs:
+            session_id = session_dir.name
+            if target_session and session_id != target_session:
+                continue
+            merged_csv = session_dir / f"{session_id}_merged.csv"
+            if not merged_csv.exists():
+                continue
+            merged_df = pd.read_csv(merged_csv)
+            eval_dir = session_dir / "evaluation"
+            summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
+            summary_df = pd.read_csv(summary_csv)
+            plot_paths = generate_session_plots(merged_df, eval_dir)
+            report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
+            repaired = repair_session_experimental_outputs(sessions_root, target_sessions={session_id})
+            rerun_count += 1
+            repaired_count += len(repaired)
+            print(f"reran -> {session_id}")
+            print(f"evaluation summary -> {summary_csv}")
+            print(f"evaluation json -> {summary_json}")
+            print(f"session report -> {report_path}")
+        if rerun_count == 0:
+            print("no existing sessions were rerun")
+            return 1
+        print(f"reran evaluations: {rerun_count}")
+        print(f"experimental repairs: {repaired_count}")
+        return 0
 
     phone_ok, phone_status = phone_is_ready()
     cnap_ok, cnap_status = cnap_is_ready(repo_root)
@@ -178,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         default_session_id = args.session_id or f"{subject_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         session_id = prompt_if_missing(args.session_id, "session_id", default_session_id)
 
-    session_root = repo_root / "Analysis" / "Data" / "realtime_sessions" / session_id
+    session_root = sessions_root / session_id
     smartphone_dir = session_root / "smartphone"
     merged_csv = session_root / f"{session_id}_merged.csv"
     eval_dir = session_root / "evaluation"
@@ -202,6 +252,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         merged_df = merge_session_data(training_csv, cnap_beats_csv, merged_csv)
         summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
+        repaired = repair_session_experimental_outputs(sessions_root, target_sessions={session_id})
         summary_df = pd.read_csv(summary_csv)
         plot_paths = generate_session_plots(merged_df, eval_dir)
         report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
@@ -210,6 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"merged csv -> {merged_csv}")
         print(f"evaluation summary -> {summary_csv}")
         print(f"evaluation json -> {summary_json}")
+        for artifact in repaired:
+            print(f"experimental summary -> {artifact.summary_csv}")
+            print(f"experimental predictions -> {artifact.predictions_csv}")
         print(f"session report -> {report_path}")
         return 0
 
@@ -284,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
 
     merged_df = merge_session_data(training_csv, cnap_beats_csv, merged_csv)
     summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
+    repaired = repair_session_experimental_outputs(sessions_root, target_sessions={session_id})
     summary_df = pd.read_csv(summary_csv)
     plot_paths = generate_session_plots(merged_df, eval_dir)
     report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
@@ -293,6 +348,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"merged csv -> {merged_csv}")
     print(f"evaluation summary -> {summary_csv}")
     print(f"evaluation json -> {summary_json}")
+    for artifact in repaired:
+        print(f"experimental summary -> {artifact.summary_csv}")
+        print(f"experimental predictions -> {artifact.predictions_csv}")
     print(f"session report -> {report_path}")
     return 0
 

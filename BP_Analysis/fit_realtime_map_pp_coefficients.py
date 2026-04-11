@@ -104,42 +104,50 @@ RICH_BASELINE_EXCLUDED_TOKENS = (
     "used_smoothed_ibi",
 )
 
-RICH_BASELINE_ALLOWED_TOKENS = (
-    "_A",
-    "_A_used",
-    "_HR",
-    "_HR_used",
-    "_V2P_relTTP",
-    "_V2P_relTTP_used",
-    "_P2V_relTTP",
-    "_P2V_relTTP_used",
-    "_E",
-    "_E_used",
-    "_Stiffness",
-    "_Stiffness_used",
-    "_Mean",
-    "_Mean_used",
-    "_Phi",
-    "_sinPhi",
-    "_sinPhi_used",
-    "_cosPhi",
-    "_cosPhi_used",
-    "_MAP_raw",
-    "_MAP_smoothed",
-    "_PP_raw",
-    "_PP_smoothed",
-    "_SBP_raw",
-    "_SBP_smoothed",
-    "_DBP_raw",
-    "_DBP_smoothed",
-    "_SBP_term_",
-    "_DBP_term_",
-    "_beat_range",
-    "_beat_std",
-    "_fit_rmse",
-    "_systole_ratio",
-    "_diastole_ratio",
+RICH_BASELINE_ALLOWED_EXACT_SUFFIXES = {
+    "A",
+    "A_used",
+    "HR",
+    "HR_used",
+    "V2P_relTTP",
+    "V2P_relTTP_used",
+    "P2V_relTTP",
+    "P2V_relTTP_used",
+    "E",
+    "E_used",
+    "Stiffness",
+    "Stiffness_used",
+    "Mean",
+    "Mean_used",
+    "Phi",
+    "sinPhi",
+    "sinPhi_used",
+    "cosPhi",
+    "cosPhi_used",
+    "MAP_raw",
+    "MAP_smoothed",
+    "PP_raw",
+    "PP_smoothed",
+    "SBP_raw",
+    "SBP_smoothed",
+    "DBP_raw",
+    "DBP_smoothed",
+    "beat_range",
+    "beat_std",
+    "fit_rmse",
+    "systole_ratio",
+    "diastole_ratio",
+}
+
+RICH_BASELINE_ALLOWED_PREFIX_SUFFIXES = (
+    "SBP_term_",
+    "DBP_term_",
 )
+
+BASELINE_MAP_MIN = 40.0
+BASELINE_MAP_MAX = 180.0
+BASELINE_PP_MIN = 10.0
+BASELINE_PP_MAX = 120.0
 
 
 @dataclass(frozen=True)
@@ -432,17 +440,28 @@ def _rich_baseline_columns(method: str, samples: list[Sample]) -> tuple[str, ...
     candidates: set[str] = set()
     for sample in samples:
         for column, value in sample.row.items():
-            if not column.startswith(prefixes):
+            matched_prefix = next((prefix for prefix in prefixes if column.startswith(prefix)), None)
+            if matched_prefix is None:
                 continue
             if any(token in column for token in RICH_BASELINE_EXCLUDED_TOKENS):
                 continue
-            if "_term_intercept" in column:
+            suffix = column[len(matched_prefix) :]
+            if suffix.endswith("_term_intercept"):
                 continue
-            if not any(token in column for token in RICH_BASELINE_ALLOWED_TOKENS):
+            if (
+                suffix not in RICH_BASELINE_ALLOWED_EXACT_SUFFIXES
+                and not any(suffix.startswith(prefix) for prefix in RICH_BASELINE_ALLOWED_PREFIX_SUFFIXES)
+            ):
                 continue
             if math.isfinite(_to_float(value)):
                 candidates.add(column)
     return tuple(sorted(candidates))
+
+
+def _sanitize_baseline_anchor(value: float, population_anchor: float, minimum: float, maximum: float) -> tuple[float, bool]:
+    if not math.isfinite(value) or value < minimum or value > maximum:
+        return population_anchor, True
+    return value, False
 
 
 def _rich_summary_feature_names(columns: tuple[str, ...]) -> tuple[str, ...]:
@@ -717,18 +736,29 @@ def evaluate_predictions(rows: list[dict[str, object]]) -> dict[str, float | int
             "DBP_mae": float("nan"),
             "DBP_rmse": float("nan"),
             "DBP_bias": float("nan"),
+            "MAP_mae": float("nan"),
+            "MAP_rmse": float("nan"),
+            "MAP_bias": float("nan"),
             "PP_mae": float("nan"),
+            "PP_rmse": float("nan"),
             "PP_bias": float("nan"),
             "SBP_corr": float("nan"),
             "DBP_corr": float("nan"),
+            "MAP_corr": float("nan"),
+            "PP_corr": float("nan"),
         }
     pred_sbp = np.array([float(row["pred_SBP"]) for row in rows], dtype=float)
     pred_dbp = np.array([float(row["pred_DBP"]) for row in rows], dtype=float)
     ref_sbp = np.array([float(row["ref_SBP"]) for row in rows], dtype=float)
     ref_dbp = np.array([float(row["ref_DBP"]) for row in rows], dtype=float)
+    pred_map = np.array([float(row["pred_MAP"]) for row in rows], dtype=float)
+    ref_map = np.array([float(row["ref_MAP"]) for row in rows], dtype=float)
+    pred_pp = np.array([float(row["pred_PP"]) for row in rows], dtype=float)
+    ref_pp = np.array([float(row["ref_PP"]) for row in rows], dtype=float)
     sbp_error = pred_sbp - ref_sbp
     dbp_error = pred_dbp - ref_dbp
-    pp_error = (pred_sbp - pred_dbp) - (ref_sbp - ref_dbp)
+    map_error = pred_map - ref_map
+    pp_error = pred_pp - ref_pp
 
     def corr(left: np.ndarray, right: np.ndarray) -> float:
         if len(left) < 2 or float(np.std(left)) == 0.0 or float(np.std(right)) == 0.0:
@@ -743,10 +773,16 @@ def evaluate_predictions(rows: list[dict[str, object]]) -> dict[str, float | int
         "DBP_mae": float(np.mean(np.abs(dbp_error))),
         "DBP_rmse": float(np.sqrt(np.mean(dbp_error**2))),
         "DBP_bias": float(np.mean(dbp_error)),
+        "MAP_mae": float(np.mean(np.abs(map_error))),
+        "MAP_rmse": float(np.sqrt(np.mean(map_error**2))),
+        "MAP_bias": float(np.mean(map_error)),
         "PP_mae": float(np.mean(np.abs(pp_error))),
+        "PP_rmse": float(np.sqrt(np.mean(pp_error**2))),
         "PP_bias": float(np.mean(pp_error)),
         "SBP_corr": corr(pred_sbp, ref_sbp),
         "DBP_corr": corr(pred_dbp, ref_dbp),
+        "MAP_corr": corr(pred_map, ref_map),
+        "PP_corr": corr(pred_pp, ref_pp),
     }
 
 
@@ -817,6 +853,18 @@ def replay_adaptive_model(
             baseline_pp = model.population_pp_anchor + model.baseline_shrinkage * (
                 baseline_pp_raw - model.population_pp_anchor
             )
+            baseline_map, baseline_map_fallback = _sanitize_baseline_anchor(
+                baseline_map,
+                model.population_map_anchor,
+                BASELINE_MAP_MIN,
+                BASELINE_MAP_MAX,
+            )
+            baseline_pp, baseline_pp_fallback = _sanitize_baseline_anchor(
+                baseline_pp,
+                model.population_pp_anchor,
+                BASELINE_PP_MIN,
+                BASELINE_PP_MAX,
+            )
 
             raw_map_pp: list[tuple[float, float]] = []
             for sample in session_samples:
@@ -849,6 +897,8 @@ def replay_adaptive_model(
                         "baseline_PP": baseline_pp,
                         "initial_baseline_beats": summary.n,
                         "baseline_shrinkage": model.baseline_shrinkage,
+                        "baseline_map_fallback_applied": int(baseline_map_fallback),
+                        "baseline_pp_fallback_applied": int(baseline_pp_fallback),
                         "ref_SBP": _to_float(sample.row.get("ref_SBP")),
                         "ref_DBP": _to_float(sample.row.get("ref_DBP")),
                         "ref_MAP": sample.ref_map,
@@ -893,6 +943,18 @@ def replay_baseline_dynamic_blend(
             )
             baseline_pp = baseline_model.population_pp_anchor + baseline_model.baseline_shrinkage * (
                 baseline_pp_raw - baseline_model.population_pp_anchor
+            )
+            baseline_map, baseline_map_fallback = _sanitize_baseline_anchor(
+                baseline_map,
+                baseline_model.population_map_anchor,
+                BASELINE_MAP_MIN,
+                BASELINE_MAP_MAX,
+            )
+            baseline_pp, baseline_pp_fallback = _sanitize_baseline_anchor(
+                baseline_pp,
+                baseline_model.population_pp_anchor,
+                BASELINE_PP_MIN,
+                BASELINE_PP_MAX,
             )
 
             rich_raw_map_pp: list[tuple[float, float]] = []
@@ -957,6 +1019,8 @@ def replay_baseline_dynamic_blend(
                         "dynamic_gain_PP": dynamic_gain_pp,
                         "initial_baseline_beats": summary.n,
                         "baseline_shrinkage": baseline_model.baseline_shrinkage,
+                        "baseline_map_fallback_applied": int(baseline_map_fallback),
+                        "baseline_pp_fallback_applied": int(baseline_pp_fallback),
                         "ref_SBP": _to_float(sample.row.get("ref_SBP")),
                         "ref_DBP": _to_float(sample.row.get("ref_DBP")),
                         "ref_MAP": sample.ref_map,
@@ -1045,12 +1109,19 @@ def build_session_style_summary(prediction_groups: list[tuple[str, list[dict[str
                 ]
                 pred_pp = np.array([float(row["pred_PP"]) for row in subset], dtype=float)
                 ref_pp = np.array([float(row["ref_PP"]) for row in subset], dtype=float)
+                pred_map = np.array([float(row["pred_MAP"]) for row in subset], dtype=float)
+                ref_map = np.array([float(row["ref_MAP"]) for row in subset], dtype=float)
                 pp_error = pred_pp - ref_pp if subset else np.array([], dtype=float)
                 pp_mae = float(np.mean(np.abs(pp_error))) if subset else float("nan")
                 pp_bias = float(np.mean(pp_error)) if subset else float("nan")
+                map_error = pred_map - ref_map if subset else np.array([], dtype=float)
+                map_mae = float(np.mean(np.abs(map_error))) if subset else float("nan")
+                map_bias = float(np.mean(map_error)) if subset else float("nan")
                 for target_label, pred_key, ref_key in (
                     ("SBP", "pred_SBP", "ref_SBP"),
                     ("DBP", "pred_DBP", "ref_DBP"),
+                    ("MAP", "pred_MAP", "ref_MAP"),
+                    ("PP", "pred_PP", "ref_PP"),
                 ):
                     if not subset:
                         rows.append(
@@ -1065,6 +1136,15 @@ def build_session_style_summary(prediction_groups: list[tuple[str, list[dict[str
                                 "rmse": float("nan"),
                                 "corr": float("nan"),
                                 "signed_bias": float("nan"),
+                                "centered_mae": float("nan"),
+                                "centered_rmse": float("nan"),
+                                "centered_corr": float("nan"),
+                                "tracking_gain": float("nan"),
+                                "amplitude_ratio": float("nan"),
+                                "direction_agreement": float("nan"),
+                                "inversion_like": float("nan"),
+                                "map_mae": float("nan"),
+                                "map_signed_bias": float("nan"),
                                 "pp_mae": float("nan"),
                                 "pp_signed_bias": float("nan"),
                             }
@@ -1073,6 +1153,21 @@ def build_session_style_summary(prediction_groups: list[tuple[str, list[dict[str
                     pred = np.array([float(row[pred_key]) for row in subset], dtype=float)
                     ref = np.array([float(row[ref_key]) for row in subset], dtype=float)
                     error = pred - ref
+                    pred_centered = pred - float(np.median(pred))
+                    ref_centered = ref - float(np.median(ref))
+                    centered_error = pred_centered - ref_centered
+                    gain_denom = float(np.sum(ref_centered**2))
+                    gain = float(np.sum(ref_centered * pred_centered) / gain_denom) if gain_denom != 0.0 else float("nan")
+                    ref_std = float(np.std(ref_centered))
+                    amplitude_ratio = float(np.std(pred_centered) / ref_std) if ref_std != 0.0 else float("nan")
+                    ref_delta = np.sign(np.diff(ref_centered))
+                    pred_delta = np.sign(np.diff(pred_centered))
+                    valid_delta = (ref_delta != 0) & (pred_delta != 0)
+                    direction_agreement = (
+                        float(np.mean(ref_delta[valid_delta] == pred_delta[valid_delta]))
+                        if valid_delta.sum() > 0
+                        else float("nan")
+                    )
                     rows.append(
                         {
                             "session": session,
@@ -1085,6 +1180,15 @@ def build_session_style_summary(prediction_groups: list[tuple[str, list[dict[str
                             "rmse": float(np.sqrt(np.mean(error**2))),
                             "corr": _corr(pred, ref),
                             "signed_bias": float(np.mean(error)),
+                            "centered_mae": float(np.mean(np.abs(centered_error))),
+                            "centered_rmse": float(np.sqrt(np.mean(centered_error**2))),
+                            "centered_corr": _corr(pred_centered, ref_centered),
+                            "tracking_gain": gain,
+                            "amplitude_ratio": amplitude_ratio,
+                            "direction_agreement": direction_agreement,
+                            "inversion_like": int(target_label == "PP" and math.isfinite(gain) and gain < 0.0),
+                            "map_mae": map_mae,
+                            "map_signed_bias": map_bias,
                             "pp_mae": pp_mae,
                             "pp_signed_bias": pp_bias,
                         }
@@ -1155,6 +1259,8 @@ def generate_timeseries_plots(
         for target, ref_key, pred_key, suffix in (
             ("SBP", "ref_SBP", "pred_SBP", "sbp"),
             ("DBP", "ref_DBP", "pred_DBP", "dbp"),
+            ("MAP", "ref_MAP", "pred_MAP", "map"),
+            ("PP", "ref_PP", "pred_PP", "pp"),
         ):
             fig, ax = plt.subplots(figsize=(12, 5), dpi=150)
             ax.plot(x_ref, [float(row[ref_key]) for row in ref_rows], label=f"CNAP {target}", color="#111111", linewidth=2.4)
@@ -1209,6 +1315,8 @@ def generate_all_scatter_plots(prediction_rows: list[dict[str, object]], output_
     for target, ref_key, pred_key, suffix in (
         ("SBP", "ref_SBP", "pred_SBP", "sbp"),
         ("DBP", "ref_DBP", "pred_DBP", "dbp"),
+        ("MAP", "ref_MAP", "pred_MAP", "map"),
+        ("PP", "ref_PP", "pred_PP", "pp"),
     ):
         fig, ax = plt.subplots(figsize=(6, 6), dpi=150)
         all_ref: list[float] = []

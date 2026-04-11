@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-METHOD_SPECS = (
+CORE_METHOD_SPECS = (
     {
         "name": "RTBP",
         "prefix": "M1",
@@ -68,7 +68,7 @@ METHOD_SPECS = (
     },
 )
 
-BASELINE_EXPORT_SPECS = tuple(
+EXPERIMENTAL_METHOD_SPECS = tuple(
     {
         "name": f"{method_name}_{series}",
         "prefix": f"{prefix}_{series}",
@@ -92,7 +92,7 @@ BASELINE_EXPORT_SPECS = tuple(
     )
 )
 
-METHOD_SPECS = METHOD_SPECS + BASELINE_EXPORT_SPECS
+ALL_METHOD_SPECS = CORE_METHOD_SPECS + EXPERIMENTAL_METHOD_SPECS
 
 PLOT_SERIES = "smoothed"
 
@@ -112,6 +112,13 @@ POSTPROCESS_COEFFICIENTS = {
     "SinBP_M": {"map_a": 0.0, "map_b": 1.0, "pp_a": 0.0, "pp_b": 1.0},
 }
 
+TARGET_SPECS = (
+    ("SBP", "ref_SBP", "pred_SBP"),
+    ("DBP", "ref_DBP", "pred_DBP"),
+    ("MAP", "ref_MAP", "pred_MAP"),
+    ("PP", "ref_PP", "pred_PP"),
+)
+
 
 def _corr(lhs: pd.Series, rhs: pd.Series) -> float:
     if len(lhs) < 2 or len(rhs) < 2:
@@ -119,6 +126,33 @@ def _corr(lhs: pd.Series, rhs: pd.Series) -> float:
     if float(lhs.std(ddof=0)) == 0.0 or float(rhs.std(ddof=0)) == 0.0:
         return float("nan")
     return float(lhs.corr(rhs))
+
+
+def _centered(series: pd.Series) -> pd.Series:
+    return series - float(series.median())
+
+
+def _tracking_gain(ref_centered: pd.Series, pred_centered: pd.Series) -> float:
+    denom = float((ref_centered**2).sum())
+    if denom == 0.0:
+        return float("nan")
+    return float((ref_centered * pred_centered).sum() / denom)
+
+
+def _direction_agreement(ref_centered: pd.Series, pred_centered: pd.Series) -> float:
+    ref_delta = np.sign(np.diff(ref_centered.to_numpy(dtype=float)))
+    pred_delta = np.sign(np.diff(pred_centered.to_numpy(dtype=float)))
+    valid = (ref_delta != 0) & (pred_delta != 0)
+    if valid.sum() == 0:
+        return float("nan")
+    return float((ref_delta[valid] == pred_delta[valid]).mean())
+
+
+def _amplitude_ratio(ref_centered: pd.Series, pred_centered: pd.Series) -> float:
+    ref_std = float(ref_centered.std(ddof=0))
+    if ref_std == 0.0:
+        return float("nan")
+    return float(pred_centered.std(ddof=0) / ref_std)
 
 
 def _markdown_table(df: pd.DataFrame) -> str:
@@ -262,7 +296,7 @@ def _ensure_identity_postprocessed_columns(
 
 def ensure_postprocessed_columns(merged_df: pd.DataFrame) -> pd.DataFrame:
     enriched = merged_df.copy()
-    for spec in METHOD_SPECS:
+    for spec in ALL_METHOD_SPECS:
         required = {spec["sbp_col"], spec["dbp_col"], spec["valid_col"], spec["reject_col"]}
         if required.issubset(set(enriched.columns)):
             if spec.get("already_smoothed"):
@@ -322,18 +356,28 @@ def build_filtered_view(merged_df: pd.DataFrame) -> pd.DataFrame:
     return filtered
 
 
-def get_available_methods(merged_df: pd.DataFrame) -> list[dict[str, str]]:
+def get_available_methods(
+    merged_df: pd.DataFrame,
+    include_experimental: bool = False,
+) -> list[dict[str, str]]:
     methods: list[dict[str, str]] = []
-    for spec in METHOD_SPECS:
+    specs = ALL_METHOD_SPECS if include_experimental else CORE_METHOD_SPECS
+    for spec in specs:
         required = {
             spec["sbp_col"],
             spec["dbp_col"],
             spec["valid_col"],
             spec["reject_col"],
+            f"{spec['prefix']}_MAP_raw",
+            f"{spec['prefix']}_PP_raw",
             f"{spec['prefix']}_SBP_smoothed",
             f"{spec['prefix']}_DBP_smoothed",
+            f"{spec['prefix']}_MAP_smoothed",
+            f"{spec['prefix']}_PP_smoothed",
             f"{spec['prefix']}_SBP_calibrated",
             f"{spec['prefix']}_DBP_calibrated",
+            f"{spec['prefix']}_MAP_calibrated",
+            f"{spec['prefix']}_PP_calibrated",
         }
         if required.issubset(set(merged_df.columns)):
             methods.append(spec)
@@ -349,33 +393,34 @@ def _method_subset(df: pd.DataFrame, spec: dict[str, str], series: str) -> pd.Da
     if series == "calibrated":
         pred_sbp_col = f"{spec['prefix']}_SBP_calibrated"
         pred_dbp_col = f"{spec['prefix']}_DBP_calibrated"
+        pred_map_col = f"{spec['prefix']}_MAP_calibrated"
+        pred_pp_col = f"{spec['prefix']}_PP_calibrated"
     elif series == "smoothed":
         pred_sbp_col = f"{spec['prefix']}_SBP_smoothed"
         pred_dbp_col = f"{spec['prefix']}_DBP_smoothed"
+        pred_map_col = f"{spec['prefix']}_MAP_smoothed"
+        pred_pp_col = f"{spec['prefix']}_PP_smoothed"
     else:
         pred_sbp_col = spec["sbp_col"]
         pred_dbp_col = spec["dbp_col"]
+        pred_map_col = f"{spec['prefix']}_MAP_raw"
+        pred_pp_col = f"{spec['prefix']}_PP_raw"
     subset["pred_SBP"] = subset[pred_sbp_col]
     subset["pred_DBP"] = subset[pred_dbp_col]
-    subset["pred_PP"] = subset["pred_SBP"] - subset["pred_DBP"]
+    subset["pred_MAP"] = subset[pred_map_col]
+    subset["pred_PP"] = subset[pred_pp_col]
     return subset
 
 
-def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[Path, Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    filtered = build_filtered_view(merged_df)
-    methods = get_available_methods(filtered)
-    filtered_csv = output_dir / "session_evaluation_input_filtered.csv"
-    filtered.to_csv(filtered_csv, index=False)
-
+def _evaluate_method_specs(
+    filtered: pd.DataFrame,
+    methods: list[dict[str, str]],
+) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for spec in methods:
         for series in ("raw", "smoothed", "calibrated"):
             subset = _method_subset(filtered, spec, series)
-            for target_label, ref_col, pred_col in (
-                ("SBP", "ref_SBP", "pred_SBP"),
-                ("DBP", "ref_DBP", "pred_DBP"),
-            ):
+            for target_label, ref_col, pred_col in TARGET_SPECS:
                 target_subset = subset.dropna(subset=[ref_col, pred_col]).copy()
                 if target_subset.empty:
                     rows.append(
@@ -389,6 +434,13 @@ def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[
                             "rmse": np.nan,
                             "corr": np.nan,
                             "signed_bias": np.nan,
+                            "centered_mae": np.nan,
+                            "centered_rmse": np.nan,
+                            "centered_corr": np.nan,
+                            "tracking_gain": np.nan,
+                            "amplitude_ratio": np.nan,
+                            "direction_agreement": np.nan,
+                            "inversion_like": np.nan,
                             "pp_mae": np.nan,
                             "pp_signed_bias": np.nan,
                         }
@@ -397,6 +449,10 @@ def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[
 
                 error = target_subset[pred_col] - target_subset[ref_col]
                 pp_error = target_subset["pred_PP"] - target_subset["ref_PP"]
+                ref_centered = _centered(target_subset[ref_col].astype(float))
+                pred_centered = _centered(target_subset[pred_col].astype(float))
+                centered_error = pred_centered - ref_centered
+                gain = _tracking_gain(ref_centered, pred_centered)
                 rows.append(
                     {
                         "method": spec["name"],
@@ -408,26 +464,158 @@ def evaluate_merged_session(merged_df: pd.DataFrame, output_dir: Path) -> tuple[
                         "rmse": float(np.sqrt((error ** 2).mean())),
                         "corr": _corr(target_subset[ref_col], target_subset[pred_col]),
                         "signed_bias": float(error.mean()),
+                        "centered_mae": float(np.abs(centered_error).mean()),
+                        "centered_rmse": float(np.sqrt((centered_error ** 2).mean())),
+                        "centered_corr": _corr(ref_centered, pred_centered),
+                        "tracking_gain": gain,
+                        "amplitude_ratio": _amplitude_ratio(ref_centered, pred_centered),
+                        "direction_agreement": _direction_agreement(ref_centered, pred_centered),
+                        "inversion_like": int(target_label == "PP" and np.isfinite(gain) and gain < 0.0),
                         "pp_mae": float(np.abs(pp_error).mean()),
                         "pp_signed_bias": float(pp_error.mean()),
                     }
                 )
+    return pd.DataFrame(rows)
 
-    summary_df = pd.DataFrame(rows)
-    summary_csv = output_dir / "session_evaluation_summary.csv"
-    summary_json = output_dir / "session_evaluation_summary.json"
-    summary_df.to_csv(summary_csv, index=False)
-    summary_json.write_text(
+
+def _term_pairs(columns: list[str], prefix: str) -> dict[str, tuple[str, str]]:
+    sbp_terms = {
+        column[len(f"{prefix}_SBP_term_") :]: column
+        for column in columns
+        if column.startswith(f"{prefix}_SBP_term_")
+    }
+    dbp_terms = {
+        column[len(f"{prefix}_DBP_term_") :]: column
+        for column in columns
+        if column.startswith(f"{prefix}_DBP_term_")
+    }
+    return {
+        term: (sbp_terms[term], dbp_terms[term])
+        for term in sorted(set(sbp_terms).intersection(dbp_terms))
+    }
+
+
+def build_pp_term_diagnostics(
+    filtered: pd.DataFrame,
+    methods: list[dict[str, str]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    term_rows: list[dict[str, object]] = []
+    culprit_rows: list[dict[str, object]] = []
+    for spec in methods:
+        pairs = _term_pairs(list(filtered.columns), spec["prefix"])
+        if not pairs or "ref_PP" not in filtered.columns:
+            continue
+        raw_subset = _method_subset(filtered, spec, "raw")
+        if raw_subset.empty:
+            continue
+        for term, (sbp_col, dbp_col) in pairs.items():
+            local = raw_subset[[sbp_col, dbp_col, "pred_PP", "ref_PP"]].dropna().copy()
+            if len(local) < 3:
+                continue
+            term_pp = local[sbp_col].astype(float) - local[dbp_col].astype(float)
+            ref_pp = local["ref_PP"].astype(float)
+            pred_pp = local["pred_PP"].astype(float)
+            term_centered = _centered(term_pp)
+            ref_centered = _centered(ref_pp)
+            pred_centered = _centered(pred_pp)
+            gain_to_ref = _tracking_gain(ref_centered, term_centered)
+            amplitude_ratio = _amplitude_ratio(ref_centered, term_centered)
+            inverse_strength = 0.0
+            if np.isfinite(gain_to_ref) and gain_to_ref < 0.0 and np.isfinite(amplitude_ratio):
+                inverse_strength = abs(gain_to_ref) * amplitude_ratio
+            term_rows.append(
+                {
+                    "method": spec["name"],
+                    "prefix": spec["prefix"],
+                    "term": term,
+                    "term_kind": "baseline" if term == "intercept" else "dynamic",
+                    "n": int(len(local)),
+                    "pp_term_mean": float(term_pp.mean()),
+                    "pp_term_median": float(term_pp.median()),
+                    "pp_term_std": float(term_pp.std(ddof=0)),
+                    "corr_to_ref_pp": _corr(term_pp, ref_pp),
+                    "centered_corr_to_ref_pp": _corr(term_centered, ref_centered),
+                    "centered_corr_to_pred_pp": _corr(term_centered, pred_centered),
+                    "gain_to_ref_pp": gain_to_ref,
+                    "amplitude_ratio_to_ref_pp": amplitude_ratio,
+                    "direction_agreement_to_ref_pp": _direction_agreement(ref_centered, term_centered),
+                    "inverse_strength": inverse_strength,
+                }
+            )
+        method_terms = pd.DataFrame([row for row in term_rows if row["method"] == spec["name"]])
+        if method_terms.empty:
+            continue
+        dynamic_terms = method_terms[method_terms["term_kind"] == "dynamic"].copy()
+        if dynamic_terms.empty:
+            continue
+        dynamic_terms = dynamic_terms.sort_values(["inverse_strength", "gain_to_ref_pp"], ascending=[False, True])
+        top = dynamic_terms.iloc[0]
+        culprit_rows.append(
+            {
+                "method": spec["name"],
+                "top_inverse_term": top["term"],
+                "top_inverse_strength": float(top["inverse_strength"]),
+                "top_gain_to_ref_pp": float(top["gain_to_ref_pp"]),
+                "top_centered_corr_to_ref_pp": float(top["centered_corr_to_ref_pp"]),
+                "top_amplitude_ratio_to_ref_pp": float(top["amplitude_ratio_to_ref_pp"]),
+            }
+        )
+    return pd.DataFrame(term_rows), pd.DataFrame(culprit_rows)
+
+
+def _write_summary_files(summary_df: pd.DataFrame, csv_path: Path, json_path: Path) -> None:
+    summary_df.to_csv(csv_path, index=False)
+    json_path.write_text(
         json.dumps(summary_df.to_dict(orient="records"), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def evaluate_merged_session(
+    merged_df: pd.DataFrame,
+    output_dir: Path,
+    include_experimental: bool = False,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filtered = build_filtered_view(merged_df)
+    methods = get_available_methods(filtered, include_experimental=include_experimental)
+    filtered_csv = output_dir / "session_evaluation_input_filtered.csv"
+    filtered.to_csv(filtered_csv, index=False)
+    summary_df = _evaluate_method_specs(filtered, methods)
+    summary_csv = output_dir / "session_evaluation_summary.csv"
+    summary_json = output_dir / "session_evaluation_summary.json"
+    _write_summary_files(summary_df, summary_csv, summary_json)
+    pp_term_df, pp_culprit_df = build_pp_term_diagnostics(filtered, methods)
+    _write_summary_files(
+        pp_term_df,
+        output_dir / "session_pp_term_diagnostics.csv",
+        output_dir / "session_pp_term_diagnostics.json",
+    )
+    _write_summary_files(
+        pp_culprit_df,
+        output_dir / "session_pp_term_culprits.csv",
+        output_dir / "session_pp_term_culprits.json",
+    )
+
+    if not include_experimental:
+        experimental_methods = get_available_methods(filtered, include_experimental=True)
+        experimental_methods = [
+            spec for spec in experimental_methods if spec not in CORE_METHOD_SPECS
+        ]
+        if experimental_methods:
+            experimental_df = _evaluate_method_specs(filtered, experimental_methods)
+            _write_summary_files(
+                experimental_df,
+                output_dir / "session_evaluation_summary_experimental.csv",
+                output_dir / "session_evaluation_summary_experimental.json",
+            )
     return summary_csv, summary_json
 
 
 def generate_session_plots(merged_df: pd.DataFrame, output_dir: Path) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     valid = build_filtered_view(merged_df).dropna(subset=["ref_SBP", "ref_DBP"]).copy()
-    methods = get_available_methods(valid)
+    methods = get_available_methods(valid, include_experimental=False)
     if valid.empty or not methods:
         return []
     if "経過時間_秒" not in valid.columns:
@@ -437,6 +625,8 @@ def generate_session_plots(merged_df: pd.DataFrame, output_dir: Path) -> list[Pa
     for target_label, ref_col, suffix in (
         ("SBP", "ref_SBP", "sbp"),
         ("DBP", "ref_DBP", "dbp"),
+        ("MAP", "ref_MAP", "map"),
+        ("PP", "ref_PP", "pp"),
     ):
         fig, ax = plt.subplots(figsize=(12, 5), dpi=150)
         ax.plot(valid["経過時間_秒"], valid[ref_col], label=f"CNAP {target_label}", linewidth=2.4, color="#111111")
@@ -475,6 +665,8 @@ def write_session_report(
     raw_summary = summary_df[summary_df["series"] == "raw"].copy()
     smoothed_summary = summary_df[summary_df["series"] == "smoothed"].copy()
     calibrated_summary = summary_df[summary_df["series"] == "calibrated"].copy()
+    pp_term_path = output_dir / "session_pp_term_diagnostics.csv"
+    pp_culprit_path = output_dir / "session_pp_term_culprits.csv"
     lines = [
         "# Session Report",
         "",
@@ -496,6 +688,26 @@ def write_session_report(
         _markdown_table(raw_summary),
         "",
     ]
+    if pp_culprit_path.exists():
+        pp_culprit_df = pd.read_csv(pp_culprit_path)
+        lines.extend(
+            [
+                "## PP Term Culprits",
+                "",
+                _markdown_table(pp_culprit_df),
+                "",
+            ]
+        )
+    if pp_term_path.exists():
+        pp_term_df = pd.read_csv(pp_term_path)
+        lines.extend(
+            [
+                "## PP Term Diagnostics",
+                "",
+                _markdown_table(pp_term_df),
+                "",
+            ]
+        )
     if plot_paths:
         lines.extend(["## Plots", ""])
         for path in plot_paths:
