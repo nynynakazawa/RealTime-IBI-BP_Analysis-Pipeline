@@ -27,8 +27,8 @@ TRACKING_BLEND_BY_TARGET: dict[str, float] = {
 TRACKING_BLEND_BY_METHOD_TARGET: dict[str, dict[str, float]] = {
     # RTBP benefits from slightly weaker PP projection to keep delta tracking robust.
     "RTBP": {
-        "MAP": 0.70,
-        "PP": 0.70,
+        "MAP": 0.90,
+        "PP": 0.90,
     },
     # SinBP_M often under-reacts in centered dynamics; use slightly stronger
     # projection blending while keeping RTBP at default blend levels.
@@ -48,11 +48,14 @@ METHOD_LAG_BLEND: dict[str, float] = {
 SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT = 8
 SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD: dict[str, int] = {
     "SinBP_D": 5,
-    "SinBP_M": 5,
+    "SinBP_M": 8,
 }
 SESSION_ALIGNMENT_LAG_CANDIDATES: tuple[int, ...] = (-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6)
 SESSION_ALIGNMENT_SIGNS: tuple[float, ...] = (1.0, -1.0)
 SESSION_ALIGNMENT_GAIN_CANDIDATES: tuple[float, ...] = (0.7, 0.85, 1.0, 1.15, 1.3)
+SESSION_ALIGNMENT_GAIN_CANDIDATES_BY_METHOD: dict[str, tuple[float, ...]] = {
+    "SinBP_M": (0.55, 0.7, 0.85, 1.0, 1.15, 1.3, 1.45),
+}
 SESSION_ALIGNMENT_PP_SCORE_WEIGHTS: tuple[float, float, float] = (0.40, 0.30, 0.30)
 SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD: dict[str, tuple[float, float, float]] = {
     # For SinBP_M, PP estimate tends to be noisier than SBP/DBP trend.
@@ -213,10 +216,9 @@ def _apply_tracking_projection(long_df: pd.DataFrame) -> pd.DataFrame:
     if long_df.empty:
         return long_df
     adjusted = long_df.copy()
-    # Tracking-only dynamic correction is currently applied to methods that showed
-    # under-responsive directionality in AROB windows.
-    # Keep SinBP_D / SinBP_D_PPShapeC untouched to avoid regressing their existing behavior.
-    active_methods = {"RTBP", "SinBP_M"}
+    # Tracking-only dynamic correction uses method-specific MAP/PP blend and is
+    # applied only to the methods listed in TRACKING_BLEND_BY_METHOD_TARGET.
+    active_methods = set(TRACKING_BLEND_BY_METHOD_TARGET.keys())
     for method in sorted(active_methods):
         method_blend = TRACKING_BLEND_BY_METHOD_TARGET.get(method, {})
         method_mask = adjusted["method"] == method
@@ -301,7 +303,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
 
             method_name = str(method)
             calib_windows = int(SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD.get(method_name, SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT))
-            gain_candidates = SESSION_ALIGNMENT_GAIN_CANDIDATES
+            gain_candidates = SESSION_ALIGNMENT_GAIN_CANDIDATES_BY_METHOD.get(method_name, SESSION_ALIGNMENT_GAIN_CANDIDATES)
             source_map = pd.to_numeric(ordered["pred_MAP"], errors="coerce")
             source_pp = pd.to_numeric(ordered["pred_PP"], errors="coerce")
             weight_pp, weight_sbp, weight_dbp = SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD.get(
