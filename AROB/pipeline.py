@@ -25,6 +25,11 @@ TRACKING_BLEND_BY_TARGET: dict[str, float] = {
     "PP": 0.88,
 }
 TRACKING_BLEND_BY_METHOD_TARGET: dict[str, dict[str, float]] = {
+    # RTBP benefits from slightly weaker PP projection to keep delta tracking robust.
+    "RTBP": {
+        "MAP": 0.70,
+        "PP": 0.70,
+    },
     # SinBP_M often under-reacts in centered dynamics; use slightly stronger
     # projection blending while keeping RTBP at default blend levels.
     "SinBP_M": {
@@ -38,7 +43,7 @@ METHOD_FIXED_WINDOW_LAG: dict[str, int] = {
 METHOD_LAG_BLEND: dict[str, float] = {
     # Keep default full lag application unless explicitly overridden.
     # SinBP_D benefits from partial lag application on pooled scatter tracking.
-    "SinBP_D": 0.80,
+    "SinBP_D": 0.75,
 }
 SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT = 8
 SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD: dict[str, int] = {
