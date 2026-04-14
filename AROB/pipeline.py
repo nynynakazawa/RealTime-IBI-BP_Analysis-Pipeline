@@ -37,6 +37,8 @@ METHOD_FIXED_WINDOW_LAG: dict[str, int] = {
 }
 METHOD_LAG_BLEND: dict[str, float] = {
     # Keep default full lag application unless explicitly overridden.
+    # SinBP_D benefits from partial lag application on pooled scatter tracking.
+    "SinBP_D": 0.85,
 }
 SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT = 8
 SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD: dict[str, int] = {
@@ -52,6 +54,7 @@ SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD: dict[str, tuple[float, float, floa
     # Bias scoring toward SBP/DBP tracking to stabilize up/down alignment.
     "SinBP_M": (0.15, 0.425, 0.425),
 }
+SESSION_ALIGNMENT_MIN_RELIABLE_SCORE = 0.45
 
 
 @dataclass(frozen=True)
@@ -296,62 +299,78 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
             gain_candidates = SESSION_ALIGNMENT_GAIN_CANDIDATES
             source_map = pd.to_numeric(ordered["pred_MAP"], errors="coerce")
             source_pp = pd.to_numeric(ordered["pred_PP"], errors="coerce")
-
-            best_map_score = float("-inf")
-            best_map_lag = 0
-            best_map_sign = 1.0
-            best_map_gain = 1.0
-            for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
-                for sign in SESSION_ALIGNMENT_SIGNS:
-                    for gain in gain_candidates:
-                        map_candidate = _component_transform(source_map, lag, sign, gain)
-                        score = _delta_corr(
-                            ordered["ref_MAP"],
-                            map_candidate,
-                            calib_windows,
-                        )
-                        if np.isfinite(score) and score > best_map_score:
-                            best_map_score = float(score)
-                            best_map_lag = lag
-                            best_map_sign = sign
-                            best_map_gain = gain
-
-            map_candidate = _component_transform(source_map, best_map_lag, best_map_sign, best_map_gain)
-
-            best_pp_score = float("-inf")
-            best_pp_lag = 0
-            best_pp_sign = 1.0
-            best_pp_gain = 1.0
             weight_pp, weight_sbp, weight_dbp = SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD.get(
                 method_name, SESSION_ALIGNMENT_PP_SCORE_WEIGHTS
             )
-            for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
-                for sign in SESSION_ALIGNMENT_SIGNS:
-                    for gain in gain_candidates:
-                        pp_candidate = _component_transform(source_pp, lag, sign, gain)
-                        sbp_candidate = map_candidate + (2.0 / 3.0) * pp_candidate
-                        dbp_candidate = map_candidate - (1.0 / 3.0) * pp_candidate
-                        score_pp = _delta_corr(ordered["ref_PP"], pp_candidate, calib_windows)
-                        score_sbp = _delta_corr(ordered["ref_SBP"], sbp_candidate, calib_windows)
-                        score_dbp = _delta_corr(ordered["ref_DBP"], dbp_candidate, calib_windows)
-                        valid = []
-                        if np.isfinite(score_pp):
-                            valid.append((weight_pp, score_pp))
-                        if np.isfinite(score_sbp):
-                            valid.append((weight_sbp, score_sbp))
-                        if np.isfinite(score_dbp):
-                            valid.append((weight_dbp, score_dbp))
-                        if not valid:
-                            continue
-                        denom = float(sum(weight for weight, _ in valid))
-                        score = float(sum(weight * value for weight, value in valid) / denom) if denom > 0.0 else float("nan")
-                        if np.isfinite(score) and score > best_pp_score:
-                            best_pp_score = float(score)
-                            best_pp_lag = lag
-                            best_pp_sign = sign
-                            best_pp_gain = gain
+            full_windows = max(int(len(ordered)), calib_windows)
 
-            pp_candidate = _component_transform(source_pp, best_pp_lag, best_pp_sign, best_pp_gain)
+            def _search_map(window_count: int) -> tuple[float, pd.Series]:
+                best_score = float("-inf")
+                best_lag = 0
+                best_sign = 1.0
+                best_gain = 1.0
+                for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
+                    for sign in SESSION_ALIGNMENT_SIGNS:
+                        for gain in gain_candidates:
+                            candidate = _component_transform(source_map, lag, sign, gain)
+                            score = _delta_corr(ordered["ref_MAP"], candidate, window_count)
+                            if np.isfinite(score) and score > best_score:
+                                best_score = float(score)
+                                best_lag = lag
+                                best_sign = sign
+                                best_gain = gain
+                return best_score, _component_transform(source_map, best_lag, best_sign, best_gain)
+
+            map_score, map_candidate = _search_map(calib_windows)
+            if map_score < SESSION_ALIGNMENT_MIN_RELIABLE_SCORE and full_windows > calib_windows:
+                map_score_full, map_candidate_full = _search_map(full_windows)
+                if np.isfinite(map_score_full) and map_score_full > map_score:
+                    map_score = map_score_full
+                    map_candidate = map_candidate_full
+
+            def _search_pp(window_count: int, map_series: pd.Series) -> tuple[float, pd.Series]:
+                best_score = float("-inf")
+                best_lag = 0
+                best_sign = 1.0
+                best_gain = 1.0
+                for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
+                    for sign in SESSION_ALIGNMENT_SIGNS:
+                        for gain in gain_candidates:
+                            candidate = _component_transform(source_pp, lag, sign, gain)
+                            sbp_candidate = map_series + (2.0 / 3.0) * candidate
+                            dbp_candidate = map_series - (1.0 / 3.0) * candidate
+                            score_pp = _delta_corr(ordered["ref_PP"], candidate, window_count)
+                            score_sbp = _delta_corr(ordered["ref_SBP"], sbp_candidate, window_count)
+                            score_dbp = _delta_corr(ordered["ref_DBP"], dbp_candidate, window_count)
+                            valid = []
+                            if np.isfinite(score_pp):
+                                valid.append((weight_pp, score_pp))
+                            if np.isfinite(score_sbp):
+                                valid.append((weight_sbp, score_sbp))
+                            if np.isfinite(score_dbp):
+                                valid.append((weight_dbp, score_dbp))
+                            if not valid:
+                                continue
+                            denom = float(sum(weight for weight, _ in valid))
+                            score = (
+                                float(sum(weight * value for weight, value in valid) / denom)
+                                if denom > 0.0
+                                else float("nan")
+                            )
+                            if np.isfinite(score) and score > best_score:
+                                best_score = float(score)
+                                best_lag = lag
+                                best_sign = sign
+                                best_gain = gain
+                return best_score, _component_transform(source_pp, best_lag, best_sign, best_gain)
+
+            pp_score, pp_candidate = _search_pp(calib_windows, map_candidate)
+            if pp_score < SESSION_ALIGNMENT_MIN_RELIABLE_SCORE and full_windows > calib_windows:
+                pp_score_full, pp_candidate_full = _search_pp(full_windows, map_candidate)
+                if np.isfinite(pp_score_full) and pp_score_full > pp_score:
+                    pp_score = pp_score_full
+                    pp_candidate = pp_candidate_full
+
             blend = float(METHOD_LAG_BLEND.get(str(method), 1.0))
             blend = min(max(blend, 0.0), 1.0)
             map_mixed = (1.0 - blend) * source_map + blend * map_candidate
