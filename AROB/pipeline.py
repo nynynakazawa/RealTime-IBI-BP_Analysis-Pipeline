@@ -24,6 +24,14 @@ TRACKING_BLEND_BY_TARGET: dict[str, float] = {
     "MAP": 0.70,
     "PP": 0.88,
 }
+TRACKING_BLEND_BY_METHOD_TARGET: dict[str, dict[str, float]] = {
+    # SinBP_M often under-reacts in centered dynamics; use slightly stronger
+    # projection blending while keeping RTBP at default blend levels.
+    "SinBP_M": {
+        "MAP": 0.88,
+        "PP": 0.96,
+    }
+}
 METHOD_FIXED_WINDOW_LAG: dict[str, int] = {
     # Legacy fallback (currently not used because session-adaptive alignment is enabled).
 }
@@ -39,6 +47,11 @@ SESSION_ALIGNMENT_LAG_CANDIDATES: tuple[int, ...] = (-6, -5, -4, -3, -2, -1, 0, 
 SESSION_ALIGNMENT_SIGNS: tuple[float, ...] = (1.0, -1.0)
 SESSION_ALIGNMENT_GAIN_CANDIDATES: tuple[float, ...] = (0.7, 0.85, 1.0, 1.15, 1.3)
 SESSION_ALIGNMENT_PP_SCORE_WEIGHTS: tuple[float, float, float] = (0.40, 0.30, 0.30)
+SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD: dict[str, tuple[float, float, float]] = {
+    # For SinBP_M, PP estimate tends to be noisier than SBP/DBP trend.
+    # Bias scoring toward SBP/DBP tracking to stabilize up/down alignment.
+    "SinBP_M": (0.15, 0.425, 0.425),
+}
 
 
 @dataclass(frozen=True)
@@ -138,6 +151,7 @@ def _crossfit_centered_projection(
     ref_col: str,
     companion_col: str,
     target_name: str,
+    blend_override: float | None = None,
 ) -> pd.Series:
     ordered = _sort_for_temporal_features(method_df)
     sessions = [str(value) for value in ordered["session_id"].dropna().unique()]
@@ -174,7 +188,7 @@ def _crossfit_centered_projection(
         y_hat = np.full(len(test_x), np.nan, dtype=float)
         y_hat[valid_test] = _predict_ridge_model(test_x[valid_test], coef, mean, scale)
 
-        blend = TRACKING_BLEND_BY_TARGET.get(target_name, 0.80)
+        blend = float(blend_override) if blend_override is not None else TRACKING_BLEND_BY_TARGET.get(target_name, 0.80)
         centered_orig = pred_centered.loc[test_mask].to_numpy(dtype=float)
         centered_new = np.full(len(centered_orig), np.nan, dtype=float)
         centered_new[valid_test] = blend * y_hat[valid_test] + (1.0 - blend) * centered_orig[valid_test]
@@ -196,6 +210,7 @@ def _apply_tracking_projection(long_df: pd.DataFrame) -> pd.DataFrame:
     # Keep SinBP_D / SinBP_D_PPShapeC untouched to avoid regressing their existing behavior.
     active_methods = {"RTBP", "SinBP_M"}
     for method in sorted(active_methods):
+        method_blend = TRACKING_BLEND_BY_METHOD_TARGET.get(method, {})
         method_mask = adjusted["method"] == method
         if int(method_mask.sum()) < 120:
             continue
@@ -209,6 +224,7 @@ def _apply_tracking_projection(long_df: pd.DataFrame) -> pd.DataFrame:
             ref_col="ref_MAP",
             companion_col="pred_PP",
             target_name="MAP",
+            blend_override=method_blend.get("MAP"),
         )
         pp_adjusted = _crossfit_centered_projection(
             method_df=method_df,
@@ -216,6 +232,7 @@ def _apply_tracking_projection(long_df: pd.DataFrame) -> pd.DataFrame:
             ref_col="ref_PP",
             companion_col="pred_MAP",
             target_name="PP",
+            blend_override=method_blend.get("PP"),
         ).clip(lower=TRACKING_PP_MIN, upper=TRACKING_PP_MAX)
         candidate = method_df.copy()
         candidate.loc[map_adjusted.index, "pred_MAP"] = map_adjusted.to_numpy(dtype=float)
@@ -276,6 +293,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
 
             method_name = str(method)
             calib_windows = int(SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD.get(method_name, SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT))
+            gain_candidates = SESSION_ALIGNMENT_GAIN_CANDIDATES
             source_map = pd.to_numeric(ordered["pred_MAP"], errors="coerce")
             source_pp = pd.to_numeric(ordered["pred_PP"], errors="coerce")
 
@@ -285,7 +303,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
             best_map_gain = 1.0
             for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
                 for sign in SESSION_ALIGNMENT_SIGNS:
-                    for gain in SESSION_ALIGNMENT_GAIN_CANDIDATES:
+                    for gain in gain_candidates:
                         map_candidate = _component_transform(source_map, lag, sign, gain)
                         score = _delta_corr(
                             ordered["ref_MAP"],
@@ -304,10 +322,12 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
             best_pp_lag = 0
             best_pp_sign = 1.0
             best_pp_gain = 1.0
-            weight_pp, weight_sbp, weight_dbp = SESSION_ALIGNMENT_PP_SCORE_WEIGHTS
+            weight_pp, weight_sbp, weight_dbp = SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD.get(
+                method_name, SESSION_ALIGNMENT_PP_SCORE_WEIGHTS
+            )
             for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
                 for sign in SESSION_ALIGNMENT_SIGNS:
-                    for gain in SESSION_ALIGNMENT_GAIN_CANDIDATES:
+                    for gain in gain_candidates:
                         pp_candidate = _component_transform(source_pp, lag, sign, gain)
                         sbp_candidate = map_candidate + (2.0 / 3.0) * pp_candidate
                         dbp_candidate = map_candidate - (1.0 / 3.0) * pp_candidate
