@@ -2,6 +2,9 @@
 
 AROB 論文用の追従重視解析をここに分離する。
 
+現在の正本データ・主比較系列・代表 run は
+`../CURRENT_STATE.md` と `../analysis_manifest.json` を参照する。
+
 責務:
 
 - `io.py`
@@ -26,4 +29,3 @@ python3 Analysis/run_arob_tracking_analysis.py
 出力先:
 
 - `Analysis/Data/arob_tracking/tracking_eval_<timestamp>/`
-

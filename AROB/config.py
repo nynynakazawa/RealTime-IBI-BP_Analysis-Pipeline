@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+
+from current_direction import (
+    ANALYSIS_ROOT,
+    PAPER_CORE_METHOD_NAMES,
+    PAPER_METHOD_NAMES,
+    PAPER_SUPPLEMENTAL_METHOD_NAMES,
+    REALTIME_SESSIONS_ROOT,
+)
 
 
 @dataclass(frozen=True)
@@ -17,9 +24,6 @@ class MethodSpec:
     reject_reason_col: str | None = None
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ANALYSIS_ROOT = REPO_ROOT / "Analysis"
-REALTIME_SESSIONS_ROOT = ANALYSIS_ROOT / "Data" / "realtime_sessions"
 OUTPUT_ROOT = ANALYSIS_ROOT / "Data" / "arob_tracking"
 
 TIME_COL = "経過時間_秒"
@@ -41,7 +45,7 @@ TRACKING_TARGET_SPECS: tuple[tuple[str, str, str], ...] = (
 WINDOW_SECONDS = (5, 10, 20)
 PRIMARY_WINDOW_SECONDS = 20
 
-METHOD_SPECS: tuple[MethodSpec, ...] = (
+CORE_METHOD_SPECS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="RTBP",
         label="RTBP",
@@ -75,6 +79,9 @@ METHOD_SPECS: tuple[MethodSpec, ...] = (
         output_valid_col="M2_output_valid",
         reject_reason_col="M2_reject_reason",
     ),
+)
+
+DIAGNOSTIC_METHOD_SPECS: tuple[MethodSpec, ...] = (
     MethodSpec(
         name="SinBP_D_EOnly",
         label="sinBP(D-EOnly)",
@@ -86,4 +93,70 @@ METHOD_SPECS: tuple[MethodSpec, ...] = (
         output_valid_col="SinBP_D_EOnly_output_valid",
         reject_reason_col="SinBP_D_EOnly_reject_reason",
     ),
+    MethodSpec(
+        name="SinBP_D_E2",
+        label="sinBP(D-E2)",
+        prefix="SinBP_D_E2",
+        sbp_col="SinBP_D_E2_SBP_calibrated",
+        dbp_col="SinBP_D_E2_DBP_calibrated",
+        map_col="SinBP_D_E2_MAP_calibrated",
+        pp_col="SinBP_D_E2_PP_calibrated",
+        output_valid_col="SinBP_D_E2_output_valid",
+        reject_reason_col="SinBP_D_E2_reject_reason",
+    ),
+    MethodSpec(
+        name="SinBP_D_LocalA",
+        label="sinBP(D-LocalA)",
+        prefix="SinBP_D_LocalA",
+        sbp_col="SinBP_D_LocalA_SBP_calibrated",
+        dbp_col="SinBP_D_LocalA_DBP_calibrated",
+        map_col="SinBP_D_LocalA_MAP_calibrated",
+        pp_col="SinBP_D_LocalA_PP_calibrated",
+        output_valid_col="SinBP_D_LocalA_output_valid",
+        reject_reason_col="SinBP_D_LocalA_reject_reason",
+    ),
+    MethodSpec(
+        name="SinBP_D_PPShapeA",
+        label="sinBP(D-PP-A)",
+        prefix="M2PPA",
+        sbp_col="M2PPA_SBP_calibrated",
+        dbp_col="M2PPA_DBP_calibrated",
+        map_col="M2PPA_MAP_calibrated",
+        pp_col="M2PPA_PP_calibrated",
+        output_valid_col="M2PPA_output_valid",
+        reject_reason_col="M2PPA_reject_reason",
+    ),
+    MethodSpec(
+        name="SinBP_D_PPShapeB",
+        label="sinBP(D-PP-B)",
+        prefix="M2PPB",
+        sbp_col="M2PPB_SBP_calibrated",
+        dbp_col="M2PPB_DBP_calibrated",
+        map_col="M2PPB_MAP_calibrated",
+        pp_col="M2PPB_PP_calibrated",
+        output_valid_col="M2PPB_output_valid",
+        reject_reason_col="M2PPB_reject_reason",
+    ),
+)
+
+SUPPLEMENTAL_METHOD_SPECS: tuple[MethodSpec, ...] = (
+    MethodSpec(
+        name="SinBP_D_PPShapeC",
+        label="sinBP(D-PP-C)",
+        prefix="M2PPC",
+        sbp_col="M2PPC_SBP_calibrated",
+        dbp_col="M2PPC_DBP_calibrated",
+        map_col="M2PPC_MAP_calibrated",
+        pp_col="M2PPC_PP_calibrated",
+        output_valid_col="M2PPC_output_valid",
+        reject_reason_col="M2PPC_reject_reason",
+    ),
+)
+
+METHOD_SPECS: tuple[MethodSpec, ...] = CORE_METHOD_SPECS + DIAGNOSTIC_METHOD_SPECS + SUPPLEMENTAL_METHOD_SPECS
+METHOD_SPEC_BY_NAME: dict[str, MethodSpec] = {spec.name: spec for spec in METHOD_SPECS}
+PAPER_METHOD_SPECS: tuple[MethodSpec, ...] = tuple(METHOD_SPEC_BY_NAME[name] for name in PAPER_METHOD_NAMES)
+PAPER_CORE_METHOD_SPECS: tuple[MethodSpec, ...] = tuple(METHOD_SPEC_BY_NAME[name] for name in PAPER_CORE_METHOD_NAMES)
+PAPER_SUPPLEMENTAL_METHOD_SPECS: tuple[MethodSpec, ...] = tuple(
+    METHOD_SPEC_BY_NAME[name] for name in PAPER_SUPPLEMENTAL_METHOD_NAMES
 )

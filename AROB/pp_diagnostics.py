@@ -147,14 +147,20 @@ def _pp_term_rows(df: pd.DataFrame, session_id: str) -> list[dict[str, object]]:
     return rows
 
 
-def build_pp_diagnostics(session_dirs: list[Path]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_pp_diagnostics(
+    session_dirs: list[Path],
+    session_frames: dict[str, pd.DataFrame] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     summary_rows: list[dict[str, object]] = []
     term_rows: list[dict[str, object]] = []
     for session_dir in session_dirs:
-        path = session_input_filtered_path(session_dir)
-        if not path.exists():
-            continue
-        df = pd.read_csv(path)
+        if session_frames is not None and session_dir.name in session_frames:
+            df = session_frames[session_dir.name]
+        else:
+            path = session_input_filtered_path(session_dir)
+            if not path.exists():
+                continue
+            df = pd.read_csv(path)
         if df.empty:
             continue
         summary_rows.extend(_pp_summary_rows(df, session_dir.name))

@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 
+
 MAX_ABS_TIME_DELTA_MS = 350.0
 ALPHA_MAP = 0.30
 ALPHA_PP = 0.50
@@ -45,6 +46,15 @@ SERIES_ORDER = (
 METHOD_ORDER = ("RTBP", "SinBP_D", "SinBP_D_EOnly", "SinBP_D_E2", "SinBP_D_LocalA", "SinBP_M")
 REFIT_METHOD_ORDER = ("RTBP", "SinBP_D", "SinBP_M")
 PLOT_METHOD_ORDER = ("RTBP", "SinBP_D", "SinBP_M")
+
+RTBP_TERM_LABELS = ("intercept", "A", "HR", "V2P_relTTP", "P2V_relTTP")
+SINBPD_TERM_LABELS = ("intercept", "A", "HR", "V2P_relTTP", "P2V_relTTP", "Stiffness", "E")
+SINBPM_TERM_LABELS = ("intercept", "A", "HR", "Mean", "sinPhi", "cosPhi")
+SINBPD_EONLY_TERM_LABELS = ("intercept", "A", "HR", "V2P_relTTP", "P2V_relTTP", "E")
+SINBPD_E2_TERM_LABELS = ("intercept", "A", "HR", "V2P_relTTP", "P2V_relTTP", "E", "E2")
+SINBPD_LOCALA_TERM_LABELS = ("intercept", "A_local", "HR", "V2P_relTTP", "P2V_relTTP", "Stiffness", "E")
+
+PP_SCALE_FIT_RIDGE_ALPHA = 25.0
 
 BASELINE_METHOD_SPECS = {
     "RTBP": ("M1_SBP_smoothed", "M1_DBP_smoothed", "M1_output_valid", "M1_reject_reason"),
@@ -172,10 +182,24 @@ class Sample:
 class FittedModels:
     rtbp_map: np.ndarray
     rtbp_pp: np.ndarray
+    rtbp_pp_term_scales: dict[str, float]
+    sinbpd_combined_map: np.ndarray
+    sinbpd_combined_pp: np.ndarray
+    sinbpd_combined_pp_term_scales: dict[str, float]
     sinbpd_residual_map: np.ndarray
     sinbpd_residual_pp: np.ndarray
     sinbpm_map: np.ndarray
     sinbpm_pp: np.ndarray
+    sinbpm_pp_term_scales: dict[str, float]
+    sinbpd_eonly_map: np.ndarray
+    sinbpd_eonly_pp: np.ndarray
+    sinbpd_eonly_pp_term_scales: dict[str, float]
+    sinbpd_e2_map: np.ndarray
+    sinbpd_e2_pp: np.ndarray
+    sinbpd_e2_pp_term_scales: dict[str, float]
+    sinbpd_locala_map: np.ndarray
+    sinbpd_locala_pp: np.ndarray
+    sinbpd_locala_pp_term_scales: dict[str, float]
 
 
 @dataclass
@@ -232,6 +256,44 @@ SINBP_M = MethodSpec(
     reject_col="M3_reject_reason",
     feature_cols=("M3_A_used", "M3_HR_used", "M3_Mean_used", "M3_sinPhi_used", "M3_cosPhi_used"),
 )
+SINBP_D_EONLY = MethodSpec(
+    name="SinBP_D_EOnly",
+    valid_col="SinBP_D_EOnly_output_valid",
+    reject_col="SinBP_D_EOnly_reject_reason",
+    feature_cols=(
+        "SinBP_D_EOnly_A_used",
+        "M2_HR_used",
+        "M2_V2P_relTTP_used",
+        "M2_P2V_relTTP_used",
+        "SinBP_D_EOnly_E_used",
+    ),
+)
+SINBP_D_E2 = MethodSpec(
+    name="SinBP_D_E2",
+    valid_col="SinBP_D_E2_output_valid",
+    reject_col="SinBP_D_E2_reject_reason",
+    feature_cols=(
+        "SinBP_D_E2_A_used",
+        "M2_HR_used",
+        "M2_V2P_relTTP_used",
+        "M2_P2V_relTTP_used",
+        "SinBP_D_E2_E_used",
+        "square:SinBP_D_E2_E_used",
+    ),
+)
+SINBP_D_LOCALA = MethodSpec(
+    name="SinBP_D_LocalA",
+    valid_col="SinBP_D_LocalA_output_valid",
+    reject_col="SinBP_D_LocalA_reject_reason",
+    feature_cols=(
+        "SinBP_D_LocalA_A_used",
+        "M2_HR_used",
+        "M2_V2P_relTTP_used",
+        "M2_P2V_relTTP_used",
+        "SinBP_D_LocalA_Stiffness_used",
+        "SinBP_D_LocalA_E_used",
+    ),
+)
 
 
 def _to_float(value: str | None) -> float:
@@ -250,6 +312,97 @@ def _to_int(value: str | None) -> int:
         return int(float(value))
     except ValueError:
         return 0
+
+
+def _feature_value(row: dict[str, str], column: str) -> float:
+    if column.startswith("square:"):
+        base_value = _to_float(row.get(column.split(":", 1)[1]))
+        if not math.isfinite(base_value):
+            return float("nan")
+        return base_value * base_value
+    return _to_float(row.get(column))
+
+
+def _term_labels_for_method(method: str) -> tuple[str, ...]:
+    return {
+        "RTBP": RTBP_TERM_LABELS,
+        "SinBP_D": SINBPD_TERM_LABELS,
+        "SinBP_M": SINBPM_TERM_LABELS,
+        "SinBP_D_EOnly": SINBPD_EONLY_TERM_LABELS,
+        "SinBP_D_E2": SINBPD_E2_TERM_LABELS,
+        "SinBP_D_LocalA": SINBPD_LOCALA_TERM_LABELS,
+    }[method]
+
+
+def _pp_scalable_terms_for_method(method: str) -> tuple[str, ...]:
+    return {
+        "RTBP": ("HR", "V2P_relTTP", "P2V_relTTP"),
+        "SinBP_D": ("HR", "Stiffness", "E"),
+        "SinBP_M": ("HR", "sinPhi"),
+        "SinBP_D_EOnly": ("HR", "E"),
+        "SinBP_D_E2": ("HR", "E", "E2"),
+        "SinBP_D_LocalA": ("HR", "Stiffness", "E"),
+    }[method]
+
+
+def _apply_pp_term_scales(
+    coefficients: np.ndarray,
+    labels: tuple[str, ...],
+    scales: dict[str, float] | None,
+) -> np.ndarray:
+    scaled = np.array(coefficients, dtype=float, copy=True)
+    if not scales:
+        return scaled
+    label_to_index = {label: index for index, label in enumerate(labels)}
+    for label, gain in scales.items():
+        index = label_to_index.get(label)
+        if index is None or index >= len(scaled):
+            continue
+        scaled[index] *= float(gain)
+    return scaled
+
+
+def _fit_pp_term_scales(
+    samples: list[Sample],
+    coefficients: np.ndarray,
+    labels: tuple[str, ...],
+    adjustable_terms: tuple[str, ...],
+    ridge_alpha: float = PP_SCALE_FIT_RIDGE_ALPHA,
+) -> dict[str, float]:
+    indices = [
+        labels.index(term)
+        for term in adjustable_terms
+        if term in labels and labels.index(term) < len(coefficients)
+    ]
+    if not samples or not indices:
+        return {}
+
+    term_matrix: list[list[float]] = []
+    residual_target: list[float] = []
+    for sample in samples:
+        features = np.concatenate(([1.0], sample.x))
+        usable = min(len(coefficients), len(features))
+        terms = np.zeros(len(coefficients), dtype=float)
+        if usable > 0:
+            terms[:usable] = coefficients[:usable] * features[:usable]
+        fixed = float(np.sum([terms[idx] for idx in range(usable) if idx not in indices]))
+        adjustable = [float(terms[idx]) for idx in indices]
+        term_matrix.append(adjustable)
+        residual_target.append(sample.ref_pp - fixed)
+
+    x = np.array(term_matrix, dtype=float)
+    y = np.array(residual_target, dtype=float)
+    if len(x) == 0:
+        return {}
+    baseline = x.sum(axis=1)
+    delta_target = y - baseline
+    penalty = np.eye(x.shape[1]) * ridge_alpha
+    delta = np.linalg.solve(x.T @ x + penalty, x.T @ delta_target)
+    scales = 1.0 + delta
+    return {
+        labels[index]: float(np.clip(scale, -3.0, 3.0))
+        for index, scale in zip(indices, scales, strict=True)
+    }
 
 
 def _load_csv(path: Path) -> list[dict[str, str]]:
@@ -323,7 +476,7 @@ def build_samples(rows: list[dict[str, str]], spec: MethodSpec) -> list[Sample]:
             continue
         if str(row.get(spec.reject_col, "missing")).strip() != "ok":
             continue
-        features = [_to_float(row.get(col)) for col in spec.feature_cols]
+        features = [_feature_value(row, col) for col in spec.feature_cols]
         if not all(math.isfinite(value) for value in features):
             continue
         samples.append(
@@ -368,9 +521,18 @@ def predict(coefficients: np.ndarray, features: np.ndarray) -> float:
 
 
 def train_models(samples_by_method: dict[str, list[Sample]], train_sessions: set[str], ridge_alpha: float) -> FittedModels:
-    rtbp_samples = [sample for sample in samples_by_method["RTBP"] if sample.session in train_sessions]
-    sinbpd_samples = [sample for sample in samples_by_method["SinBP_D"] if sample.session in train_sessions]
-    sinbpm_samples = [sample for sample in samples_by_method["SinBP_M"] if sample.session in train_sessions]
+    rtbp_samples = [sample for sample in samples_by_method.get("RTBP", []) if sample.session in train_sessions]
+    sinbpd_samples = [sample for sample in samples_by_method.get("SinBP_D", []) if sample.session in train_sessions]
+    sinbpd_eonly_samples = [
+        sample for sample in samples_by_method.get("SinBP_D_EOnly", []) if sample.session in train_sessions
+    ]
+    sinbpd_e2_samples = [
+        sample for sample in samples_by_method.get("SinBP_D_E2", []) if sample.session in train_sessions
+    ]
+    sinbpd_locala_samples = [
+        sample for sample in samples_by_method.get("SinBP_D_LocalA", []) if sample.session in train_sessions
+    ]
+    sinbpm_samples = [sample for sample in samples_by_method.get("SinBP_M", []) if sample.session in train_sessions]
 
     rtbp_map = fit_standardized_ridge(rtbp_samples, "ref_map", ridge_alpha)
     rtbp_pp = fit_standardized_ridge(rtbp_samples, "ref_pp", ridge_alpha)
@@ -391,17 +553,80 @@ def train_models(samples_by_method: dict[str, list[Sample]], train_sessions: set
         )
     sinbpd_residual_map = fit_standardized_ridge(residual_samples, "ref_map", ridge_alpha)
     sinbpd_residual_pp = fit_standardized_ridge(residual_samples, "ref_pp", ridge_alpha)
+    sinbpd_combined_map = np.concatenate(
+        [[rtbp_map[0] + sinbpd_residual_map[0]], rtbp_map[1:], sinbpd_residual_map[1:]]
+    )
+    sinbpd_combined_pp = np.concatenate(
+        [[rtbp_pp[0] + sinbpd_residual_pp[0]], rtbp_pp[1:], sinbpd_residual_pp[1:]]
+    )
 
     sinbpm_map = fit_standardized_ridge(sinbpm_samples, "ref_map", ridge_alpha)
     sinbpm_pp = fit_standardized_ridge(sinbpm_samples, "ref_pp", ridge_alpha)
+    sinbpd_eonly_map = fit_standardized_ridge(sinbpd_eonly_samples, "ref_map", ridge_alpha)
+    sinbpd_eonly_pp = fit_standardized_ridge(sinbpd_eonly_samples, "ref_pp", ridge_alpha)
+    sinbpd_e2_map = fit_standardized_ridge(sinbpd_e2_samples, "ref_map", ridge_alpha)
+    sinbpd_e2_pp = fit_standardized_ridge(sinbpd_e2_samples, "ref_pp", ridge_alpha)
+    sinbpd_locala_map = fit_standardized_ridge(sinbpd_locala_samples, "ref_map", ridge_alpha)
+    sinbpd_locala_pp = fit_standardized_ridge(sinbpd_locala_samples, "ref_pp", ridge_alpha)
+
+    rtbp_pp_term_scales = _fit_pp_term_scales(
+        rtbp_samples,
+        rtbp_pp,
+        RTBP_TERM_LABELS,
+        _pp_scalable_terms_for_method("RTBP"),
+    )
+    sinbpd_combined_pp_term_scales = _fit_pp_term_scales(
+        sinbpd_samples,
+        sinbpd_combined_pp,
+        SINBPD_TERM_LABELS,
+        _pp_scalable_terms_for_method("SinBP_D"),
+    )
+    sinbpm_pp_term_scales = _fit_pp_term_scales(
+        sinbpm_samples,
+        sinbpm_pp,
+        SINBPM_TERM_LABELS,
+        _pp_scalable_terms_for_method("SinBP_M"),
+    )
+    sinbpd_eonly_pp_term_scales = _fit_pp_term_scales(
+        sinbpd_eonly_samples,
+        sinbpd_eonly_pp,
+        SINBPD_EONLY_TERM_LABELS,
+        _pp_scalable_terms_for_method("SinBP_D_EOnly"),
+    )
+    sinbpd_e2_pp_term_scales = _fit_pp_term_scales(
+        sinbpd_e2_samples,
+        sinbpd_e2_pp,
+        SINBPD_E2_TERM_LABELS,
+        _pp_scalable_terms_for_method("SinBP_D_E2"),
+    )
+    sinbpd_locala_pp_term_scales = _fit_pp_term_scales(
+        sinbpd_locala_samples,
+        sinbpd_locala_pp,
+        SINBPD_LOCALA_TERM_LABELS,
+        _pp_scalable_terms_for_method("SinBP_D_LocalA"),
+    )
 
     return FittedModels(
         rtbp_map=rtbp_map,
         rtbp_pp=rtbp_pp,
+        rtbp_pp_term_scales=rtbp_pp_term_scales,
+        sinbpd_combined_map=sinbpd_combined_map,
+        sinbpd_combined_pp=sinbpd_combined_pp,
+        sinbpd_combined_pp_term_scales=sinbpd_combined_pp_term_scales,
         sinbpd_residual_map=sinbpd_residual_map,
         sinbpd_residual_pp=sinbpd_residual_pp,
         sinbpm_map=sinbpm_map,
         sinbpm_pp=sinbpm_pp,
+        sinbpm_pp_term_scales=sinbpm_pp_term_scales,
+        sinbpd_eonly_map=sinbpd_eonly_map,
+        sinbpd_eonly_pp=sinbpd_eonly_pp,
+        sinbpd_eonly_pp_term_scales=sinbpd_eonly_pp_term_scales,
+        sinbpd_e2_map=sinbpd_e2_map,
+        sinbpd_e2_pp=sinbpd_e2_pp,
+        sinbpd_e2_pp_term_scales=sinbpd_e2_pp_term_scales,
+        sinbpd_locala_map=sinbpd_locala_map,
+        sinbpd_locala_pp=sinbpd_locala_pp,
+        sinbpd_locala_pp_term_scales=sinbpd_locala_pp_term_scales,
     )
 
 
@@ -714,15 +939,51 @@ def smooth_map_pp(values: list[tuple[float, float]]) -> list[tuple[float, float]
 
 def predict_method_map_pp(models: FittedModels, method: str, features: np.ndarray) -> tuple[float, float]:
     if method == "RTBP":
-        return predict(models.rtbp_map, features), predict(models.rtbp_pp, features)
+        return predict(models.rtbp_map, features), predict(
+            _apply_pp_term_scales(models.rtbp_pp, RTBP_TERM_LABELS, models.rtbp_pp_term_scales),
+            features,
+        )
     if method == "SinBP_D":
-        base_features = features[:4]
-        residual_features = features[4:]
-        map_value = predict(models.rtbp_map, base_features) + predict(models.sinbpd_residual_map, residual_features)
-        pp_value = predict(models.rtbp_pp, base_features) + predict(models.sinbpd_residual_pp, residual_features)
-        return map_value, pp_value
+        return predict(models.sinbpd_combined_map, features), predict(
+            _apply_pp_term_scales(
+                models.sinbpd_combined_pp,
+                SINBPD_TERM_LABELS,
+                models.sinbpd_combined_pp_term_scales,
+            ),
+            features,
+        )
     if method == "SinBP_M":
-        return predict(models.sinbpm_map, features), predict(models.sinbpm_pp, features)
+        return predict(models.sinbpm_map, features), predict(
+            _apply_pp_term_scales(models.sinbpm_pp, SINBPM_TERM_LABELS, models.sinbpm_pp_term_scales),
+            features,
+        )
+    if method == "SinBP_D_EOnly":
+        return predict(models.sinbpd_eonly_map, features), predict(
+            _apply_pp_term_scales(
+                models.sinbpd_eonly_pp,
+                SINBPD_EONLY_TERM_LABELS,
+                models.sinbpd_eonly_pp_term_scales,
+            ),
+            features,
+        )
+    if method == "SinBP_D_E2":
+        return predict(models.sinbpd_e2_map, features), predict(
+            _apply_pp_term_scales(
+                models.sinbpd_e2_pp,
+                SINBPD_E2_TERM_LABELS,
+                models.sinbpd_e2_pp_term_scales,
+            ),
+            features,
+        )
+    if method == "SinBP_D_LocalA":
+        return predict(models.sinbpd_locala_map, features), predict(
+            _apply_pp_term_scales(
+                models.sinbpd_locala_pp,
+                SINBPD_LOCALA_TERM_LABELS,
+                models.sinbpd_locala_pp_term_scales,
+            ),
+            features,
+        )
     raise ValueError(f"unknown method: {method}")
 
 
@@ -761,9 +1022,20 @@ def evaluate_predictions(rows: list[dict[str, object]]) -> dict[str, float | int
     pp_error = pred_pp - ref_pp
 
     def corr(left: np.ndarray, right: np.ndarray) -> float:
-        if len(left) < 2 or float(np.std(left)) == 0.0 or float(np.std(right)) == 0.0:
+        local = np.column_stack((left, right)) if len(left) and len(right) else np.empty((0, 2))
+        if local.size == 0:
             return float("nan")
-        return float(np.corrcoef(left, right)[0, 1])
+        local = local[np.isfinite(local).all(axis=1)]
+        if len(local) < 2:
+            return float("nan")
+        left_local = local[:, 0]
+        right_local = local[:, 1]
+        left_centered = left_local - float(np.mean(left_local))
+        right_centered = right_local - float(np.mean(right_local))
+        denom = float(np.sqrt(np.sum(left_centered**2) * np.sum(right_centered**2)))
+        if denom <= 0.0:
+            return float("nan")
+        return float(np.sum(left_centered * right_centered) / denom)
 
     return {
         "n": int(len(rows)),
@@ -788,8 +1060,8 @@ def evaluate_predictions(rows: list[dict[str, object]]) -> dict[str, float | int
 
 def replay_model(models: FittedModels, samples_by_method: dict[str, list[Sample]], eval_sessions: set[str]) -> list[dict[str, object]]:
     prediction_rows: list[dict[str, object]] = []
-    for method in ("RTBP", "SinBP_D", "SinBP_M"):
-        method_samples = [sample for sample in samples_by_method[method] if sample.session in eval_sessions]
+    for method in METHOD_ORDER:
+        method_samples = [sample for sample in samples_by_method.get(method, []) if sample.session in eval_sessions]
         for session in sorted({sample.session for sample in method_samples}):
             session_samples = sorted(
                 [sample for sample in method_samples if sample.session == session],
@@ -1090,9 +1362,20 @@ def build_summary(prediction_rows: list[dict[str, object]], label: str) -> list[
 
 
 def _corr(left: np.ndarray, right: np.ndarray) -> float:
-    if len(left) < 2 or float(np.std(left)) == 0.0 or float(np.std(right)) == 0.0:
+    local = np.column_stack((left, right)) if len(left) and len(right) else np.empty((0, 2))
+    if local.size == 0:
         return float("nan")
-    return float(np.corrcoef(left, right)[0, 1])
+    local = local[np.isfinite(local).all(axis=1)]
+    if len(local) < 2:
+        return float("nan")
+    left_local = local[:, 0]
+    right_local = local[:, 1]
+    left_centered = left_local - float(np.mean(left_local))
+    right_centered = right_local - float(np.mean(right_local))
+    denom = float(np.sqrt(np.sum(left_centered**2) * np.sum(right_centered**2)))
+    if denom <= 0.0:
+        return float("nan")
+    return float(np.sum(left_centered * right_centered) / denom)
 
 
 def build_session_style_summary(prediction_groups: list[tuple[str, list[dict[str, object]]]]) -> list[dict[str, object]]:
@@ -1350,9 +1633,36 @@ def generate_all_scatter_plots(prediction_rows: list[dict[str, object]], output_
 
 
 def coefficients_payload(models: FittedModels, sessions_root: Path, ridge_alpha: float) -> dict[str, object]:
-    rtbp_sbp, rtbp_dbp = map_pp_to_sbp_dbp(models.rtbp_map, models.rtbp_pp)
+    rtbp_pp = _apply_pp_term_scales(models.rtbp_pp, RTBP_TERM_LABELS, models.rtbp_pp_term_scales)
+    sinbpd_combined_pp = _apply_pp_term_scales(
+        models.sinbpd_combined_pp,
+        SINBPD_TERM_LABELS,
+        models.sinbpd_combined_pp_term_scales,
+    )
+    sinbpm_pp = _apply_pp_term_scales(models.sinbpm_pp, SINBPM_TERM_LABELS, models.sinbpm_pp_term_scales)
+    sinbpd_eonly_pp = _apply_pp_term_scales(
+        models.sinbpd_eonly_pp,
+        SINBPD_EONLY_TERM_LABELS,
+        models.sinbpd_eonly_pp_term_scales,
+    )
+    sinbpd_e2_pp = _apply_pp_term_scales(
+        models.sinbpd_e2_pp,
+        SINBPD_E2_TERM_LABELS,
+        models.sinbpd_e2_pp_term_scales,
+    )
+    sinbpd_locala_pp = _apply_pp_term_scales(
+        models.sinbpd_locala_pp,
+        SINBPD_LOCALA_TERM_LABELS,
+        models.sinbpd_locala_pp_term_scales,
+    )
+
+    rtbp_sbp, rtbp_dbp = map_pp_to_sbp_dbp(models.rtbp_map, rtbp_pp)
+    sinbpm_sbp, sinbpm_dbp = map_pp_to_sbp_dbp(models.sinbpm_map, sinbpm_pp)
+    sinbpd_sbp, sinbpd_dbp = map_pp_to_sbp_dbp(models.sinbpd_combined_map, sinbpd_combined_pp)
     sinbpd_gamma, sinbpd_delta = map_pp_to_sbp_dbp(models.sinbpd_residual_map, models.sinbpd_residual_pp)
-    sinbpm_sbp, sinbpm_dbp = map_pp_to_sbp_dbp(models.sinbpm_map, models.sinbpm_pp)
+    sinbpd_eonly_sbp, sinbpd_eonly_dbp = map_pp_to_sbp_dbp(models.sinbpd_eonly_map, sinbpd_eonly_pp)
+    sinbpd_e2_sbp, sinbpd_e2_dbp = map_pp_to_sbp_dbp(models.sinbpd_e2_map, sinbpd_e2_pp)
+    sinbpd_locala_sbp, sinbpd_locala_dbp = map_pp_to_sbp_dbp(models.sinbpd_locala_map, sinbpd_locala_pp)
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "sessions_root": str(sessions_root),
@@ -1365,23 +1675,60 @@ def coefficients_payload(models: FittedModels, sessions_root: Path, ridge_alpha:
                 "features": list(RTBP.feature_cols),
                 "MAP": models.rtbp_map.tolist(),
                 "PP": models.rtbp_pp.tolist(),
+                "PP_effective": rtbp_pp.tolist(),
                 "SBP": rtbp_sbp.tolist(),
                 "DBP": rtbp_dbp.tolist(),
+                "pp_term_scales": models.rtbp_pp_term_scales,
             },
             "SinBP_D": {
-                "architecture": "RTBP base with M2 A/HR/relTTP features plus residual [intercept, Stiffness_sin, E]",
+                "architecture": "RTBP MAP/PP base with M2 A/HR/relTTP features plus residual [intercept, Stiffness_sin, E]",
                 "residual_features": ["M2_Stiffness_used", "M2_E_used"],
                 "residual_MAP": models.sinbpd_residual_map.tolist(),
                 "residual_PP": models.sinbpd_residual_pp.tolist(),
+                "combined_MAP": models.sinbpd_combined_map.tolist(),
+                "combined_PP": models.sinbpd_combined_pp.tolist(),
+                "combined_PP_effective": sinbpd_combined_pp.tolist(),
+                "combined_SBP": sinbpd_sbp.tolist(),
+                "combined_DBP": sinbpd_dbp.tolist(),
                 "GAMMA_SBP_correction": sinbpd_gamma.tolist(),
                 "DELTA_DBP_correction": sinbpd_delta.tolist(),
+                "pp_term_scales": models.sinbpd_combined_pp_term_scales,
+            },
+            "SinBP_D_EOnly": {
+                "features": list(SINBP_D_EONLY.feature_cols),
+                "MAP": models.sinbpd_eonly_map.tolist(),
+                "PP": models.sinbpd_eonly_pp.tolist(),
+                "PP_effective": sinbpd_eonly_pp.tolist(),
+                "SBP": sinbpd_eonly_sbp.tolist(),
+                "DBP": sinbpd_eonly_dbp.tolist(),
+                "pp_term_scales": models.sinbpd_eonly_pp_term_scales,
+            },
+            "SinBP_D_E2": {
+                "features": list(SINBP_D_E2.feature_cols),
+                "MAP": models.sinbpd_e2_map.tolist(),
+                "PP": models.sinbpd_e2_pp.tolist(),
+                "PP_effective": sinbpd_e2_pp.tolist(),
+                "SBP": sinbpd_e2_sbp.tolist(),
+                "DBP": sinbpd_e2_dbp.tolist(),
+                "pp_term_scales": models.sinbpd_e2_pp_term_scales,
+            },
+            "SinBP_D_LocalA": {
+                "features": list(SINBP_D_LOCALA.feature_cols),
+                "MAP": models.sinbpd_locala_map.tolist(),
+                "PP": models.sinbpd_locala_pp.tolist(),
+                "PP_effective": sinbpd_locala_pp.tolist(),
+                "SBP": sinbpd_locala_sbp.tolist(),
+                "DBP": sinbpd_locala_dbp.tolist(),
+                "pp_term_scales": models.sinbpd_locala_pp_term_scales,
             },
             "SinBP_M": {
                 "features": list(SINBP_M.feature_cols),
                 "MAP": models.sinbpm_map.tolist(),
                 "PP": models.sinbpm_pp.tolist(),
+                "PP_effective": sinbpm_pp.tolist(),
                 "SBP": sinbpm_sbp.tolist(),
                 "DBP": sinbpm_dbp.tolist(),
+                "pp_term_scales": models.sinbpm_pp_term_scales,
             },
         },
     }
@@ -1448,6 +1795,9 @@ def main() -> int:
     samples_by_method = {
         "RTBP": build_samples(rows, RTBP),
         "SinBP_D": build_samples(rows, SINBP_D),
+        "SinBP_D_EOnly": build_samples(rows, SINBP_D_EONLY),
+        "SinBP_D_E2": build_samples(rows, SINBP_D_E2),
+        "SinBP_D_LocalA": build_samples(rows, SINBP_D_LOCALA),
         "SinBP_M": build_samples(rows, SINBP_M),
     }
     sessions = sorted({str(row["_session"]) for row in rows})

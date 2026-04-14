@@ -10,6 +10,7 @@ import subprocess
 import time
 from datetime import datetime
 
+from current_direction import REALTIME_SESSIONS_ROOT, REPO_ROOT
 from realtime_pipeline.android_bridge import (
     AndroidBeatEvent,
     AndroidLogcatMonitor,
@@ -161,8 +162,8 @@ def select_nearest_cnap(phone: AndroidBeatEvent, cnap_events: deque[CNAPBeatEven
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     kill_stale_session_processes(os.getpid())
-    repo_root = Path(__file__).resolve().parent.parent
-    sessions_root = repo_root / "Analysis" / "Data" / "realtime_sessions"
+    repo_root = REPO_ROOT
+    sessions_root = REALTIME_SESSIONS_ROOT
 
     if args.repair_existing_experimental:
         target_sessions = {args.repair_target_session.strip()} if args.repair_target_session.strip() else None

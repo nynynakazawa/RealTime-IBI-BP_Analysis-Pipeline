@@ -9,6 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from .map_pp_runtime import append_runtime_map_pp_columns
 
 
 CORE_METHOD_SPECS = (
@@ -123,9 +124,17 @@ TARGET_SPECS = (
 def _corr(lhs: pd.Series, rhs: pd.Series) -> float:
     if len(lhs) < 2 or len(rhs) < 2:
         return float("nan")
-    if float(lhs.std(ddof=0)) == 0.0 or float(rhs.std(ddof=0)) == 0.0:
+    local = pd.concat([lhs, rhs], axis=1).dropna()
+    if len(local) < 2:
         return float("nan")
-    return float(lhs.corr(rhs))
+    left = local.iloc[:, 0].to_numpy(dtype=float)
+    right = local.iloc[:, 1].to_numpy(dtype=float)
+    left_centered = left - float(np.mean(left))
+    right_centered = right - float(np.mean(right))
+    denom = float(np.sqrt(np.sum(left_centered**2) * np.sum(right_centered**2)))
+    if denom <= 0.0:
+        return float("nan")
+    return float(np.sum(left_centered * right_centered) / denom)
 
 
 def _centered(series: pd.Series) -> pd.Series:
@@ -295,7 +304,7 @@ def _ensure_identity_postprocessed_columns(
 
 
 def ensure_postprocessed_columns(merged_df: pd.DataFrame) -> pd.DataFrame:
-    enriched = merged_df.copy()
+    enriched = append_runtime_map_pp_columns(merged_df)
     for spec in ALL_METHOD_SPECS:
         required = {spec["sbp_col"], spec["dbp_col"], spec["valid_col"], spec["reject_col"]}
         if required.issubset(set(enriched.columns)):

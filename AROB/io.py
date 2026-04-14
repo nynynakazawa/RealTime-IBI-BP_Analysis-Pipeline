@@ -36,6 +36,18 @@ def load_session_input_filtered(session_dir: Path) -> pd.DataFrame:
         REF_MAP_COL,
         REF_PP_COL,
         ARTIFACT_COL,
+        "M2_A_used",
+        "M2_HR_used",
+        "M2_V2P_relTTP_used",
+        "M2_P2V_relTTP_used",
+        "M2_Stiffness_used",
+        "M2_E_used",
+        "M2_IBI_current_ms",
+        "M2_beat_sample_count",
+        "M2_beat_range",
+        "M2_beat_std",
+        "M2_systole_ratio",
+        "M2_diastole_ratio",
     }
     for spec in METHOD_SPECS:
         usecols.add(spec.sbp_col)

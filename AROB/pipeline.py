@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import OUTPUT_ROOT, PRIMARY_WINDOW_SECONDS, WINDOW_SECONDS
+from .config import OUTPUT_ROOT, PAPER_METHOD_NAMES, PRIMARY_WINDOW_SECONDS, WINDOW_SECONDS
 from .io import build_long_dataframe, list_session_dirs, load_session_input_filtered
 from .metrics import compute_centered_metrics, summarize_metrics
-from .plots import plot_metric_boxplots, plot_representative_session, plot_window_sensitivity
+from .plots import plot_metric_boxplots, plot_subject_sessions, plot_window_sensitivity
+from .pp_feature_replay import add_pp_replay_candidates, write_pp_replay_artifacts
 from .pp_diagnostics import build_pp_diagnostics, write_pp_diagnostic_report
 from .report import write_markdown_report, write_metadata
 from .windowing import aggregate_non_overlapping_windows
@@ -19,12 +20,19 @@ from .windowing import aggregate_non_overlapping_windows
 class PipelineOutputs:
     output_dir: Path
     per_window_path: Path
+    per_window_all_path: Path
     per_session_metrics_path: Path
+    per_session_metrics_all_path: Path
     centered_samples_path: Path
+    centered_samples_all_path: Path
     summary_path: Path
+    summary_all_path: Path
     pp_summary_path: Path
     pp_term_path: Path
     pp_culprit_path: Path
+    pp_feature_screening_path: Path
+    pp_feature_culprit_path: Path
+    pp_feature_coefficients_path: Path
     pp_report_path: Path
     report_path: Path
     metadata_path: Path
@@ -57,9 +65,18 @@ def _select_representative_session(centered_df: pd.DataFrame) -> str | None:
 
 def run_tracking_analysis(output_root: Path = OUTPUT_ROOT, make_plots: bool = True) -> PipelineOutputs:
     session_dirs = list_session_dirs()
-    rows: list[pd.DataFrame] = []
+    base_frames: dict[str, pd.DataFrame] = {}
     for session_dir in session_dirs:
         filtered = load_session_input_filtered(session_dir)
+        if not filtered.empty:
+            base_frames[session_dir.name] = filtered
+    if not base_frames:
+        raise RuntimeError("no realtime sessions could be loaded for AROB tracking analysis")
+
+    pp_replay_outputs = add_pp_replay_candidates(base_frames)
+
+    rows: list[pd.DataFrame] = []
+    for session_id, filtered in pp_replay_outputs.session_frames.items():
         long_df = build_long_dataframe(filtered)
         if not long_df.empty:
             rows.append(long_df)
@@ -87,32 +104,53 @@ def run_tracking_analysis(output_root: Path = OUTPUT_ROOT, make_plots: bool = Tr
     centered_df = pd.concat(centered_frames, ignore_index=True)
     summary_df = summarize_metrics(per_session_metrics_df)
 
+    paper_methods = set(PAPER_METHOD_NAMES)
+    per_window_paper_df = per_window_df[per_window_df["method"].isin(paper_methods)].copy()
+    per_session_metrics_paper_df = per_session_metrics_df[per_session_metrics_df["method"].isin(paper_methods)].copy()
+    centered_paper_df = centered_df[centered_df["method"].isin(paper_methods)].copy()
+    summary_paper_df = summary_df[summary_df["method"].isin(paper_methods)].copy()
+
     per_window_path = output_dir / "windowed_timeseries.csv"
+    per_window_all_path = output_dir / "windowed_timeseries_all.csv"
     per_session_metrics_path = output_dir / "session_centered_metrics.csv"
+    per_session_metrics_all_path = output_dir / "session_centered_metrics_all.csv"
     centered_samples_path = output_dir / "centered_window_samples.csv"
+    centered_samples_all_path = output_dir / "centered_window_samples_all.csv"
     summary_path = output_dir / "aggregate_tracking_summary.csv"
+    summary_all_path = output_dir / "aggregate_tracking_summary_all.csv"
     pp_summary_path = output_dir / "pp_component_summary.csv"
     pp_term_path = output_dir / "pp_term_diagnostics.csv"
     pp_culprit_path = output_dir / "pp_term_culprit_summary.csv"
+    pp_feature_screening_path = output_dir / "pp_feature_screening.csv"
+    pp_feature_culprit_path = output_dir / "pp_feature_culprits.csv"
+    pp_feature_coefficients_path = output_dir / "pp_feature_candidate_coefficients.csv"
     pp_report_path = output_dir / "pp_diagnostic_report.md"
     report_path = output_dir / "tracking_analysis_summary.md"
     metadata_path = output_dir / "tracking_analysis_metadata.json"
 
-    per_window_df.to_csv(per_window_path, index=False)
-    per_session_metrics_df.to_csv(per_session_metrics_path, index=False)
-    centered_df.to_csv(centered_samples_path, index=False)
-    summary_df.to_csv(summary_path, index=False)
-    pp_summary_df, pp_term_df, pp_culprit_df = build_pp_diagnostics(session_dirs)
+    per_window_df.to_csv(per_window_all_path, index=False)
+    per_session_metrics_df.to_csv(per_session_metrics_all_path, index=False)
+    centered_df.to_csv(centered_samples_all_path, index=False)
+    summary_df.to_csv(summary_all_path, index=False)
+    per_window_paper_df.to_csv(per_window_path, index=False)
+    per_session_metrics_paper_df.to_csv(per_session_metrics_path, index=False)
+    centered_paper_df.to_csv(centered_samples_path, index=False)
+    summary_paper_df.to_csv(summary_path, index=False)
+    pp_feature_paths = write_pp_replay_artifacts(output_dir, pp_replay_outputs)
+    pp_summary_df, pp_term_df, pp_culprit_df = build_pp_diagnostics(
+        session_dirs,
+        session_frames=pp_replay_outputs.session_frames,
+    )
     pp_summary_df.to_csv(pp_summary_path, index=False)
     pp_term_df.to_csv(pp_term_path, index=False)
     pp_culprit_df.to_csv(pp_culprit_path, index=False)
     write_pp_diagnostic_report(pp_report_path, pp_summary_df, pp_culprit_df)
 
-    representative_session = _select_representative_session(centered_df)
+    representative_session = _select_representative_session(centered_paper_df)
     if make_plots:
-        plot_metric_boxplots(per_session_metrics_df, plots_dir)
-        plot_window_sensitivity(summary_df, plots_dir)
-        plot_representative_session(centered_df, plots_dir, representative_session=representative_session)
+        plot_metric_boxplots(per_session_metrics_paper_df, plots_dir)
+        plot_window_sensitivity(summary_paper_df, plots_dir)
+        plot_subject_sessions(centered_paper_df, plots_dir, representative_session=representative_session)
 
     metadata = {
         "primary_window_seconds": PRIMARY_WINDOW_SECONDS,
@@ -121,22 +159,34 @@ def run_tracking_analysis(output_root: Path = OUTPUT_ROOT, make_plots: bool = Tr
         "session_ids": [path.name for path in session_dirs],
         "representative_session": representative_session,
         "plots_generated": bool(make_plots),
+        "paper_methods": list(PAPER_METHOD_NAMES),
+        "full_summary_csv": str(summary_all_path),
         "pp_component_summary": str(pp_summary_path),
         "pp_term_diagnostics": str(pp_term_path),
         "pp_term_culprit_summary": str(pp_culprit_path),
+        "pp_feature_screening": str(pp_feature_paths["pp_feature_screening"]),
+        "pp_feature_culprits": str(pp_feature_paths["pp_feature_culprits"]),
+        "pp_feature_candidate_coefficients": str(pp_feature_paths["pp_feature_candidate_coefficients"]),
     }
-    write_markdown_report(report_path, summary_df, representative_session, metadata)
+    write_markdown_report(report_path, summary_paper_df, representative_session, metadata)
     write_metadata(metadata_path, metadata)
 
     return PipelineOutputs(
         output_dir=output_dir,
         per_window_path=per_window_path,
+        per_window_all_path=per_window_all_path,
         per_session_metrics_path=per_session_metrics_path,
+        per_session_metrics_all_path=per_session_metrics_all_path,
         centered_samples_path=centered_samples_path,
+        centered_samples_all_path=centered_samples_all_path,
         summary_path=summary_path,
+        summary_all_path=summary_all_path,
         pp_summary_path=pp_summary_path,
         pp_term_path=pp_term_path,
         pp_culprit_path=pp_culprit_path,
+        pp_feature_screening_path=pp_feature_screening_path,
+        pp_feature_culprit_path=pp_feature_culprit_path,
+        pp_feature_coefficients_path=pp_feature_coefficients_path,
         pp_report_path=pp_report_path,
         report_path=report_path,
         metadata_path=metadata_path,

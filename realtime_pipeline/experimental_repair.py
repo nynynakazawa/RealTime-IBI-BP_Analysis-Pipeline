@@ -19,6 +19,9 @@ from BP_Analysis.fit_realtime_map_pp_coefficients import (
     EVALUATION_FILTERS,
     RTBP,
     SINBP_D,
+    SINBP_D_E2,
+    SINBP_D_EONLY,
+    SINBP_D_LOCALA,
     SINBP_M,
     build_samples,
     load_reference_rows,
@@ -56,6 +59,9 @@ def _prediction_groups_for_all_sessions(
     samples_by_method = {
         "RTBP": build_samples(rows, RTBP),
         "SinBP_D": build_samples(rows, SINBP_D),
+        "SinBP_D_EOnly": build_samples(rows, SINBP_D_EONLY),
+        "SinBP_D_E2": build_samples(rows, SINBP_D_E2),
+        "SinBP_D_LocalA": build_samples(rows, SINBP_D_LOCALA),
         "SinBP_M": build_samples(rows, SINBP_M),
     }
     all_sessions = {str(row["_session"]) for row in rows}
@@ -132,9 +138,20 @@ def _prediction_groups_for_all_sessions(
 
 
 def _corr(lhs: np.ndarray, rhs: np.ndarray) -> float:
-    if len(lhs) < 2 or float(np.std(lhs)) == 0.0 or float(np.std(rhs)) == 0.0:
+    local = np.column_stack((lhs, rhs)) if len(lhs) and len(rhs) else np.empty((0, 2))
+    if local.size == 0:
         return float("nan")
-    return float(np.corrcoef(lhs, rhs)[0, 1])
+    local = local[np.isfinite(local).all(axis=1)]
+    if len(local) < 2:
+        return float("nan")
+    left = local[:, 0]
+    right = local[:, 1]
+    left_centered = left - float(np.mean(left))
+    right_centered = right - float(np.mean(right))
+    denom = float(np.sqrt(np.sum(left_centered**2) * np.sum(right_centered**2)))
+    if denom <= 0.0:
+        return float("nan")
+    return float(np.sum(left_centered * right_centered) / denom)
 
 
 def _raw_sbp_dbp(row: dict[str, object]) -> tuple[float, float]:
