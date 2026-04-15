@@ -38,8 +38,8 @@ TRACKING_BLEND_BY_METHOD_TARGET: dict[str, dict[str, float]] = {
     },
     # Weak projection stabilizes PPShapeC without collapsing waveform dynamics.
     "SinBP_D_PPShapeC": {
-        "MAP": 0.15,
-        "PP": 0.15,
+        "MAP": 0.22,
+        "PP": 0.22,
     }
 }
 METHOD_FIXED_WINDOW_LAG: dict[str, int] = {
