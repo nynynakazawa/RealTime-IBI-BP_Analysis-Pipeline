@@ -35,6 +35,11 @@ TRACKING_BLEND_BY_METHOD_TARGET: dict[str, dict[str, float]] = {
     "SinBP_M": {
         "MAP": 1.00,
         "PP": 1.00,
+    },
+    # Weak projection stabilizes PPShapeC without collapsing waveform dynamics.
+    "SinBP_D_PPShapeC": {
+        "MAP": 0.15,
+        "PP": 0.15,
     }
 }
 METHOD_FIXED_WINDOW_LAG: dict[str, int] = {
@@ -68,6 +73,7 @@ SESSION_ALIGNMENT_SIGNS: tuple[float, ...] = (1.0, -1.0)
 SESSION_ALIGNMENT_SIGNS_BY_METHOD: dict[str, tuple[float, ...]] = {
     # For SinBP_D, sign flip often collapses PP directionality.
     "SinBP_D": (1.0,),
+    "SinBP_D_PPShapeC": (1.0,),
 }
 SESSION_ALIGNMENT_GAIN_CANDIDATES: tuple[float, ...] = (0.7, 0.85, 1.0, 1.15, 1.3)
 SESSION_ALIGNMENT_GAIN_CANDIDATES_BY_METHOD: dict[str, tuple[float, ...]] = {
