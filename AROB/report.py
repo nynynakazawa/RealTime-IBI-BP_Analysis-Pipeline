@@ -30,12 +30,16 @@ def write_markdown_report(
         target_df = primary[primary["target"] == target].sort_values("mean_centered_mae")
         lines.append(f"## {target} at {PRIMARY_WINDOW_SECONDS} s")
         lines.append("")
-        lines.append("| Method | Mean cMAE | Mean dCorr | Mean hpCorr |")
-        lines.append("| --- | ---: | ---: | ---: |")
+        lines.append("| Method | Mean MAE | Mean RMSE | Mean Corr | Mean Bias | Mean cMAE | Mean dCorr | Mean hpCorr |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
         for _, row in target_df.iterrows():
             lines.append(
-                "| {label} | {cmae:.3f} | {dcorr:.3f} | {hpcorr:.3f} |".format(
+                "| {label} | {mae:.3f} | {rmse:.3f} | {corr:.3f} | {bias:.3f} | {cmae:.3f} | {dcorr:.3f} | {hpcorr:.3f} |".format(
                     label=row["method_label"],
+                    mae=row["mean_mae"],
+                    rmse=row["mean_rmse"],
+                    corr=row["mean_corr"],
+                    bias=row["mean_signed_bias"],
                     cmae=row["mean_centered_mae"],
                     dcorr=row["mean_delta_corr"],
                     hpcorr=row["mean_detrended_corr"],

@@ -27,6 +27,7 @@ class MethodTune:
     calib_windows: int
     pp_weights: tuple[float, float, float]
     sign_mode: str  # "base" or "positive_only"
+    lag_mode: str  # "base", "wide", "med", "narrow", "xnarrow"
 
 
 @dataclass
@@ -40,7 +41,10 @@ class EvalResult:
     objective: float
     mean_method_corr: float
     min_method_corr: float
+    mean_nonrtbp_corr: float
+    min_nonrtbp_corr: float
     amp_score: float
+    nonrtbp_amp_score: float
     method_corr: dict[str, float]
     detail: dict[str, dict[str, dict[str, float]]]
 
@@ -51,6 +55,7 @@ class Snapshot:
     calib: dict[str, int]
     pp_weights: dict[str, tuple[float, float, float]]
     signs_by_method: dict[str, tuple[float, ...]]
+    lag_candidates_by_method: dict[str, tuple[int, ...]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +67,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rounds", type=int, default=2, help="Coordinate-descent rounds.")
     parser.add_argument("--with-plots", action="store_true", help="Generate plots for final selected run.")
+    parser.add_argument(
+        "--freeze-rtbp",
+        action="store_true",
+        default=True,
+        help="Do not tune RTBP and focus optimization on non-RTBP methods.",
+    )
+    parser.add_argument(
+        "--focus-non-rtbp",
+        action="store_true",
+        default=True,
+        help="Use objective emphasizing non-RTBP methods (SinBP_D / PPShapeC / SinBP_M).",
+    )
     parser.add_argument(
         "--trials-root",
         type=Path,
@@ -83,6 +100,7 @@ def _snapshot() -> Snapshot:
         calib=deepcopy(pipeline.SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD),
         pp_weights=deepcopy(pipeline.SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD),
         signs_by_method=deepcopy(pipeline.SESSION_ALIGNMENT_SIGNS_BY_METHOD),
+        lag_candidates_by_method=deepcopy(pipeline.SESSION_ALIGNMENT_LAG_CANDIDATES_BY_METHOD),
     )
 
 
@@ -91,6 +109,34 @@ def _restore(snapshot: Snapshot) -> None:
     pipeline.SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD = deepcopy(snapshot.calib)
     pipeline.SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD = deepcopy(snapshot.pp_weights)
     pipeline.SESSION_ALIGNMENT_SIGNS_BY_METHOD = deepcopy(snapshot.signs_by_method)
+    pipeline.SESSION_ALIGNMENT_LAG_CANDIDATES_BY_METHOD = deepcopy(snapshot.lag_candidates_by_method)
+
+
+def _lag_mode_from_candidates(candidates: tuple[int, ...] | None) -> str:
+    if candidates is None:
+        return "base"
+    options = {
+        "wide": (-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6),
+        "med": (-4, -3, -2, -1, 0, 1, 2, 3, 4),
+        "narrow": (-3, -2, -1, 0, 1, 2, 3),
+        "xnarrow": (-2, -1, 0, 1, 2),
+    }
+    for mode, values in options.items():
+        if tuple(candidates) == values:
+            return mode
+    return "base"
+
+
+def _lag_candidates_for_mode(mode: str) -> tuple[int, ...] | None:
+    if mode == "base":
+        return None
+    mapping = {
+        "wide": (-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6),
+        "med": (-4, -3, -2, -1, 0, 1, 2, 3, 4),
+        "narrow": (-3, -2, -1, 0, 1, 2, 3),
+        "xnarrow": (-2, -1, 0, 1, 2),
+    }
+    return mapping.get(mode)
 
 
 def _base_sign_mode(method: str, snapshot: Snapshot) -> str:
@@ -152,12 +198,14 @@ def _read_centered_metrics(path: Path) -> dict[str, dict[str, tuple[float, float
     return result
 
 
-def _evaluate_output(output_dir: Path) -> EvalResult:
+def _evaluate_output(output_dir: Path, focus_non_rtbp: bool) -> EvalResult:
     centered_path = output_dir / "centered_window_samples.csv"
     stats = _read_centered_metrics(centered_path)
     method_corr: dict[str, float] = {}
     detail: dict[str, dict[str, dict[str, float]]] = {}
     amp_values: list[float] = []
+    nonrtbp_amp_values: list[float] = []
+    nonrtbp_methods = {"SinBP_D", "SinBP_D_PPShapeC", "SinBP_M"}
     for method in TRACK_METHODS:
         per_target = stats.get(method, {})
         corr_values: list[float] = []
@@ -167,6 +215,8 @@ def _evaluate_output(output_dir: Path) -> EvalResult:
             ratio = pred_std / ref_std if ref_std and ref_std > 0.0 else math.nan
             if math.isfinite(ratio):
                 amp_values.append(min(max(ratio, 0.0), 1.0))
+                if method in nonrtbp_methods:
+                    nonrtbp_amp_values.append(min(max(ratio, 0.0), 1.0))
             if math.isfinite(corr):
                 corr_values.append(corr)
             detail[method][target] = {
@@ -180,15 +230,32 @@ def _evaluate_output(output_dir: Path) -> EvalResult:
     valid_method_corr = [value for value in method_corr.values() if math.isfinite(value)]
     mean_method_corr = sum(valid_method_corr) / len(valid_method_corr) if valid_method_corr else math.nan
     min_method_corr = min(valid_method_corr) if valid_method_corr else math.nan
+    nonrtbp_corr_values = [
+        method_corr[m] for m in nonrtbp_methods if m in method_corr and math.isfinite(method_corr[m])
+    ]
+    mean_nonrtbp_corr = sum(nonrtbp_corr_values) / len(nonrtbp_corr_values) if nonrtbp_corr_values else math.nan
+    min_nonrtbp_corr = min(nonrtbp_corr_values) if nonrtbp_corr_values else math.nan
     amp_score = sum(amp_values) / len(amp_values) if amp_values else 0.0
+    nonrtbp_amp_score = sum(nonrtbp_amp_values) / len(nonrtbp_amp_values) if nonrtbp_amp_values else 0.0
 
-    objective = (0.6 * min_method_corr) + (0.4 * mean_method_corr) + (0.05 * amp_score)
+    if focus_non_rtbp:
+        objective = (
+            0.65 * min_nonrtbp_corr
+            + 0.30 * mean_nonrtbp_corr
+            + 0.08 * nonrtbp_amp_score
+            + 0.05 * mean_method_corr
+        )
+    else:
+        objective = (0.6 * min_method_corr) + (0.4 * mean_method_corr) + (0.05 * amp_score)
     return EvalResult(
         output_dir=output_dir,
         objective=objective,
         mean_method_corr=mean_method_corr,
         min_method_corr=min_method_corr,
+        mean_nonrtbp_corr=mean_nonrtbp_corr,
+        min_nonrtbp_corr=min_nonrtbp_corr,
         amp_score=amp_score,
+        nonrtbp_amp_score=nonrtbp_amp_score,
         method_corr=method_corr,
         detail=detail,
     )
@@ -199,6 +266,7 @@ def _apply_config(config: TuneConfig, snapshot: Snapshot) -> None:
     calib = deepcopy(snapshot.calib)
     weights = deepcopy(snapshot.pp_weights)
     signs = deepcopy(snapshot.signs_by_method)
+    lag_candidates = deepcopy(snapshot.lag_candidates_by_method)
     for method, tune in config.method_tunes.items():
         lag[method] = tune.lag_blend
         calib[method] = tune.calib_windows
@@ -208,11 +276,17 @@ def _apply_config(config: TuneConfig, snapshot: Snapshot) -> None:
         else:
             # Use global sign candidates for this method by removing method override.
             signs.pop(method, None)
+        mode_candidates = _lag_candidates_for_mode(tune.lag_mode)
+        if mode_candidates is None:
+            lag_candidates.pop(method, None)
+        else:
+            lag_candidates[method] = mode_candidates
 
     pipeline.METHOD_LAG_BLEND = lag
     pipeline.SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD = calib
     pipeline.SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD = weights
     pipeline.SESSION_ALIGNMENT_SIGNS_BY_METHOD = signs
+    pipeline.SESSION_ALIGNMENT_LAG_CANDIDATES_BY_METHOD = lag_candidates
 
 
 def _clone_config(config: TuneConfig) -> TuneConfig:
@@ -227,6 +301,7 @@ def _base_config(snapshot: Snapshot) -> TuneConfig:
             calib_windows=int(snapshot.calib.get(method, pipeline.SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT)),
             pp_weights=tuple(snapshot.pp_weights.get(method, pipeline.SESSION_ALIGNMENT_PP_SCORE_WEIGHTS)),
             sign_mode=_base_sign_mode(method, snapshot),
+            lag_mode=_lag_mode_from_candidates(snapshot.lag_candidates_by_method.get(method)),
         )
     return TuneConfig(method_tunes=tunes)
 
@@ -234,50 +309,82 @@ def _base_config(snapshot: Snapshot) -> TuneConfig:
 def _candidate_tunes(method: str, current: MethodTune) -> list[MethodTune]:
     candidates: list[MethodTune] = [
         current,
-        MethodTune(0.85, current.calib_windows, current.pp_weights, current.sign_mode),
-        MethodTune(0.95, current.calib_windows, current.pp_weights, current.sign_mode),
-        MethodTune(1.0, current.calib_windows, current.pp_weights, current.sign_mode),
-        MethodTune(current.lag_blend, 10, current.pp_weights, current.sign_mode),
-        MethodTune(current.lag_blend, current.calib_windows, ALT_PP_WEIGHTS, current.sign_mode),
-        MethodTune(0.85, 10, current.pp_weights, current.sign_mode),
-        MethodTune(0.95, current.calib_windows, ALT_PP_WEIGHTS, current.sign_mode),
+        MethodTune(0.85, current.calib_windows, current.pp_weights, current.sign_mode, current.lag_mode),
+        MethodTune(0.95, current.calib_windows, current.pp_weights, current.sign_mode, current.lag_mode),
+        MethodTune(1.0, current.calib_windows, current.pp_weights, current.sign_mode, current.lag_mode),
+        MethodTune(current.lag_blend, 10, current.pp_weights, current.sign_mode, current.lag_mode),
+        MethodTune(current.lag_blend, current.calib_windows, ALT_PP_WEIGHTS, current.sign_mode, current.lag_mode),
+        MethodTune(0.85, 10, current.pp_weights, current.sign_mode, current.lag_mode),
+        MethodTune(0.95, current.calib_windows, ALT_PP_WEIGHTS, current.sign_mode, current.lag_mode),
     ]
     if method in ("SinBP_D", "SinBP_D_PPShapeC"):
         candidates.append(
-            MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, "positive_only")
+            MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, "positive_only", current.lag_mode)
         )
     if method == "SinBP_D_PPShapeC":
         candidates.extend(
             [
-                MethodTune(0.70, 8, current.pp_weights, "base"),
-                MethodTune(0.75, 8, current.pp_weights, "base"),
-                MethodTune(0.80, 8, current.pp_weights, "base"),
-                MethodTune(0.90, 8, current.pp_weights, "base"),
-                MethodTune(1.10, 8, current.pp_weights, "base"),
-                MethodTune(0.90, 10, ALT_PP_WEIGHTS, "base"),
-                MethodTune(0.80, 10, ALT_PP_WEIGHTS, "base"),
+                MethodTune(0.70, 8, current.pp_weights, "base", current.lag_mode),
+                MethodTune(0.75, 8, current.pp_weights, "base", current.lag_mode),
+                MethodTune(0.80, 8, current.pp_weights, "base", current.lag_mode),
+                MethodTune(0.90, 8, current.pp_weights, "base", current.lag_mode),
+                MethodTune(1.10, 8, current.pp_weights, "base", current.lag_mode),
+                MethodTune(0.90, 10, ALT_PP_WEIGHTS, "base", current.lag_mode),
+                MethodTune(0.80, 10, ALT_PP_WEIGHTS, "base", current.lag_mode),
+            ]
+        )
+    if method == "SinBP_D":
+        candidates.extend(
+            [
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "wide"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "med"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "narrow"),
+            ]
+        )
+    if method == "SinBP_D_PPShapeC":
+        candidates.extend(
+            [
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "base"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "wide"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "med"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "narrow"),
+            ]
+        )
+    if method == "SinBP_M":
+        candidates.extend(
+            [
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "base"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "med"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "narrow"),
+                MethodTune(current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, "xnarrow"),
             ]
         )
     # De-duplicate while preserving order.
     unique: list[MethodTune] = []
-    seen: set[tuple[float, int, tuple[float, float, float], str]] = set()
+    seen: set[tuple[float, int, tuple[float, float, float], str, str]] = set()
     for c in candidates:
-        key = (c.lag_blend, c.calib_windows, c.pp_weights, c.sign_mode)
+        key = (c.lag_blend, c.calib_windows, c.pp_weights, c.sign_mode, c.lag_mode)
         if key in seen:
             continue
         seen.add(key)
         unique.append(c)
     # Always include current tune.
-    current_key = (current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode)
+    current_key = (current.lag_blend, current.calib_windows, current.pp_weights, current.sign_mode, current.lag_mode)
     if current_key not in seen:
         unique.insert(0, current)
     return unique
 
 
-def _run_once(config: TuneConfig, snapshot: Snapshot, output_root: Path, make_plots: bool) -> EvalResult:
+def _run_once(
+    config: TuneConfig,
+    snapshot: Snapshot,
+    output_root: Path,
+    make_plots: bool,
+    focus_non_rtbp: bool,
+) -> EvalResult:
     _apply_config(config, snapshot)
     outputs = pipeline.run_tracking_analysis(output_root=output_root, make_plots=make_plots)
-    return _evaluate_output(outputs.output_dir)
+    return _evaluate_output(outputs.output_dir, focus_non_rtbp=focus_non_rtbp)
 
 
 def _is_better_for_method(candidate: EvalResult, current: EvalResult, method: str) -> bool:
@@ -304,7 +411,10 @@ def _write_summary(path: Path, baseline: EvalResult, tuned: EvalResult, config: 
             "objective": baseline.objective,
             "mean_method_corr": baseline.mean_method_corr,
             "min_method_corr": baseline.min_method_corr,
+            "mean_nonrtbp_corr": baseline.mean_nonrtbp_corr,
+            "min_nonrtbp_corr": baseline.min_nonrtbp_corr,
             "amp_score": baseline.amp_score,
+            "nonrtbp_amp_score": baseline.nonrtbp_amp_score,
             "method_corr": baseline.method_corr,
             "detail": baseline.detail,
         },
@@ -313,7 +423,10 @@ def _write_summary(path: Path, baseline: EvalResult, tuned: EvalResult, config: 
             "objective": tuned.objective,
             "mean_method_corr": tuned.mean_method_corr,
             "min_method_corr": tuned.min_method_corr,
+            "mean_nonrtbp_corr": tuned.mean_nonrtbp_corr,
+            "min_nonrtbp_corr": tuned.min_nonrtbp_corr,
             "amp_score": tuned.amp_score,
+            "nonrtbp_amp_score": tuned.nonrtbp_amp_score,
             "method_corr": tuned.method_corr,
             "detail": tuned.detail,
         },
@@ -323,6 +436,7 @@ def _write_summary(path: Path, baseline: EvalResult, tuned: EvalResult, config: 
                 "calib_windows": tune.calib_windows,
                 "pp_weights": tune.pp_weights,
                 "sign_mode": tune.sign_mode,
+                "lag_mode": tune.lag_mode,
             }
             for method, tune in config.method_tunes.items()
         },
@@ -333,7 +447,9 @@ def _write_summary(path: Path, baseline: EvalResult, tuned: EvalResult, config: 
 def _print_eval(tag: str, result: EvalResult) -> None:
     print(
         f"{tag}: objective={result.objective:.4f} "
-        f"mean_corr={result.mean_method_corr:.4f} min_corr={result.min_method_corr:.4f} amp={result.amp_score:.4f}"
+        f"mean_corr={result.mean_method_corr:.4f} min_corr={result.min_method_corr:.4f} "
+        f"mean_nonrtbp={result.mean_nonrtbp_corr:.4f} min_nonrtbp={result.min_nonrtbp_corr:.4f} "
+        f"amp={result.amp_score:.4f}"
     )
     for method in TRACK_METHODS:
         print(f"  {method:16s} corr={result.method_corr.get(method, math.nan):.4f}")
@@ -354,6 +470,7 @@ def main() -> int:
         snapshot=snapshot,
         output_root=trials_root / "baseline",
         make_plots=False,
+        focus_non_rtbp=bool(args.focus_non_rtbp),
     )
     _print_eval("baseline", baseline_eval)
     current_eval = baseline_eval
@@ -362,7 +479,10 @@ def main() -> int:
         for round_idx in range(1, max(int(args.rounds), 1) + 1):
             print(f"\n=== round {round_idx} ===")
             round_improved = False
-            for method in TRACK_METHODS:
+            method_order = list(TRACK_METHODS)
+            if args.freeze_rtbp:
+                method_order = [m for m in method_order if m != "RTBP"]
+            for method in method_order:
                 base_tune = config.method_tunes[method]
                 best_tune = base_tune
                 best_eval = current_eval
@@ -376,12 +496,13 @@ def main() -> int:
                         snapshot=snapshot,
                         output_root=trials_root / f"round_{round_idx}" / method / f"cand_{cand_idx:02d}",
                         make_plots=False,
+                        focus_non_rtbp=bool(args.focus_non_rtbp),
                     )
                     improved = _is_better_for_method(result, best_eval, method)
                     print(
                         f"  cand {cand_idx:02d} "
                         f"lag={cand.lag_blend:.2f} calib={cand.calib_windows} "
-                        f"weights={cand.pp_weights} sign={cand.sign_mode} "
+                        f"weights={cand.pp_weights} sign={cand.sign_mode} lag_mode={cand.lag_mode} "
                         f"corr[{method}]={result.method_corr.get(method, math.nan):.4f} "
                         f"obj={result.objective:.4f}"
                         + (" *" if improved else "")
@@ -395,7 +516,8 @@ def main() -> int:
                     round_improved = True
                     print(
                         f"selected {method}: lag={best_tune.lag_blend:.2f} "
-                        f"calib={best_tune.calib_windows} weights={best_tune.pp_weights} sign={best_tune.sign_mode}"
+                        f"calib={best_tune.calib_windows} weights={best_tune.pp_weights} "
+                        f"sign={best_tune.sign_mode} lag_mode={best_tune.lag_mode}"
                     )
                 else:
                     print(f"selected {method}: keep current")
@@ -408,6 +530,7 @@ def main() -> int:
             snapshot=snapshot,
             output_root=args.final_root,
             make_plots=bool(args.with_plots),
+            focus_non_rtbp=bool(args.focus_non_rtbp),
         )
         _print_eval("final", final_eval)
 
@@ -419,7 +542,8 @@ def main() -> int:
             tune = config.method_tunes[method]
             print(
                 f"  {method}: lag_blend={tune.lag_blend:.2f}, "
-                f"calib_windows={tune.calib_windows}, pp_weights={tune.pp_weights}, sign={tune.sign_mode}"
+                f"calib_windows={tune.calib_windows}, pp_weights={tune.pp_weights}, "
+                f"sign={tune.sign_mode}, lag_mode={tune.lag_mode}"
             )
 
     finally:

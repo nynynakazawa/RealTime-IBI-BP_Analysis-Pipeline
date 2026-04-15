@@ -34,6 +34,17 @@ DEFAULT_PP_TERM_SCALES = {
     "SinBP_D_LocalA": {"HR": 1.0, "E": 0.65, "Stiffness": 1.0},
 }
 
+TRACKING_BLEND_SERIES_KEY = "experimental_smartphone_rich_dynamic_blend"
+TRACKING_BLEND_METHOD_SPECS = (
+    ("RTBP", "M1", "M1_output_valid", "M1_reject_reason", RTBP_TERM_LABELS),
+    ("SinBP_D", "M2", "M2_output_valid", "M2_reject_reason", SINBPD_TERM_LABELS),
+    ("SinBP_M", "M3", "M3_output_valid", "M3_reject_reason", SINBPM_TERM_LABELS),
+)
+BASELINE_MAP_MIN = 40.0
+BASELINE_MAP_MAX = 180.0
+BASELINE_PP_MIN = 10.0
+BASELINE_PP_MAX = 120.0
+
 _LABEL_TO_INDEX = {
     "RTBP": {label: index for index, label in enumerate(RTBP_TERM_LABELS)},
     "SinBP_D": {label: index for index, label in enumerate(SINBPD_TERM_LABELS)},
@@ -103,12 +114,55 @@ def _to_float(value: object) -> float:
     return result if math.isfinite(result) else float("nan")
 
 
+def _feature_vector_for_prefix(prefix: str, row: pd.Series) -> np.ndarray | None:
+    if prefix == "M1":
+        features = np.array(
+            [
+                _to_float(row.get("M1_A_used")),
+                _to_float(row.get("M1_HR_used")),
+                _to_float(row.get("M1_V2P_relTTP_used")),
+                _to_float(row.get("M1_P2V_relTTP_used")),
+            ],
+            dtype=float,
+        )
+    elif prefix == "M2":
+        features = np.array(
+            [
+                _to_float(row.get("M2_A_used")),
+                _to_float(row.get("M2_HR_used")),
+                _to_float(row.get("M2_V2P_relTTP_used")),
+                _to_float(row.get("M2_P2V_relTTP_used")),
+                _to_float(row.get("M2_Stiffness_used")),
+                _to_float(row.get("M2_E_used")),
+            ],
+            dtype=float,
+        )
+    elif prefix == "M3":
+        features = np.array(
+            [
+                _to_float(row.get("M3_A_used")),
+                _to_float(row.get("M3_HR_used")),
+                _to_float(row.get("M3_Mean_used")),
+                _to_float(row.get("M3_sinPhi_used")),
+                _to_float(row.get("M3_cosPhi_used")),
+            ],
+            dtype=float,
+        )
+    else:
+        return None
+    return features if np.isfinite(features).all() else None
+
+
 def _is_valid_row(row: pd.Series, valid_col: str, reject_col: str) -> bool:
     return int(_to_float(row.get(valid_col, 0.0))) == 1 and str(row.get(reject_col, "missing")).strip() == "ok"
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return lower if value < lower else upper if value > upper else value
+
+
+def predict(coefficients: np.ndarray, features: np.ndarray) -> float:
+    return float(coefficients[0] + np.dot(coefficients[1:], features))
 
 
 def _clamp_bp(method: str, sbp: float, dbp: float) -> tuple[float, float]:
@@ -119,6 +173,240 @@ def _clamp_bp(method: str, sbp: float, dbp: float) -> tuple[float, float]:
     constrained_sbp = _clamp(constrained_sbp, 60.0, 200.0)
     constrained_dbp = _clamp(constrained_dbp, 40.0, 150.0)
     return constrained_sbp, constrained_dbp
+
+
+def _sanitize_baseline_anchor(value: float, population_anchor: float, minimum: float, maximum: float) -> float:
+    if not math.isfinite(value) or value < minimum or value > maximum:
+        return population_anchor
+    return value
+
+
+def _smooth_map_pp(values: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    smoothed: list[tuple[float, float]] = []
+    last_map = float("nan")
+    last_pp = float("nan")
+    for map_value, pp_value in values:
+        if not math.isfinite(last_map):
+            map_smoothed = map_value
+            pp_smoothed = pp_value
+        else:
+            map_smoothed = 0.30 * map_value + (1.0 - 0.30) * last_map
+            pp_smoothed = 0.50 * pp_value + (1.0 - 0.50) * last_pp
+        last_map = map_smoothed
+        last_pp = pp_smoothed
+        smoothed.append((map_smoothed, pp_smoothed))
+    return smoothed
+
+
+def _build_rich_summary(
+    samples: list[dict[str, object]],
+    source_columns: tuple[str, ...],
+    initial_beats: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    initial_samples = samples[:initial_beats]
+    if not initial_samples:
+        return None
+    anchor_features = np.median(np.vstack([sample["features"] for sample in initial_samples]), axis=0)
+    summary_values: list[float] = []
+    for column in source_columns:
+        values = np.array([_to_float(sample["row"].get(column)) for sample in initial_samples], dtype=float)
+        finite = values[np.isfinite(values)]
+        if len(finite) == 0:
+            summary_values.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+            continue
+        summary_values.extend(
+            [
+                float(np.median(finite)),
+                float(np.std(finite)),
+                float(np.percentile(finite, 10)),
+                float(np.percentile(finite, 90)),
+                float(finite[-1] - finite[0]) if len(finite) >= 2 else 0.0,
+            ]
+        )
+    return np.array(summary_values, dtype=float), anchor_features
+
+
+def _tracking_blend_overrides(df: pd.DataFrame, runtime_coefficients: dict[str, object]) -> dict[str, list[float]]:
+    blend_spec = runtime_coefficients.get(TRACKING_BLEND_SERIES_KEY)
+    if not isinstance(blend_spec, dict):
+        return {}
+    baseline_key = str(blend_spec.get("baseline_model", "")).strip()
+    baseline_models = runtime_coefficients.get(baseline_key)
+    if not isinstance(baseline_models, dict):
+        return {}
+
+    session_col = "session_id" if "session_id" in df.columns else None
+    session_values = (
+        df[session_col].fillna("__single_session__").astype(str)
+        if session_col
+        else pd.Series(["__single_session__"] * len(df), index=df.index)
+    )
+    index_positions = {index: position for position, index in enumerate(df.index)}
+    dynamic_gain_map = _to_float(blend_spec.get("dynamic_gain_MAP"))
+    dynamic_gain_pp = _to_float(blend_spec.get("dynamic_gain_PP"))
+    if not math.isfinite(dynamic_gain_map):
+        dynamic_gain_map = 0.25
+    if not math.isfinite(dynamic_gain_pp):
+        dynamic_gain_pp = 0.25
+
+    overrides: dict[str, list[float]] = {}
+    for method_name, prefix, valid_col, reject_col, labels in TRACKING_BLEND_METHOD_SPECS:
+        baseline_model = baseline_models.get(method_name)
+        if not isinstance(baseline_model, dict):
+            continue
+        source_columns = tuple(str(column) for column in baseline_model.get("summary_source_columns", []))
+        baseline_map_coefficients = np.array(baseline_model.get("baseline_MAP", []), dtype=float)
+        baseline_pp_coefficients = np.array(baseline_model.get("baseline_PP", []), dtype=float)
+        delta_map_coefficients = np.array(baseline_model.get("delta_MAP", []), dtype=float)
+        delta_pp_coefficients = np.array(baseline_model.get("delta_PP", []), dtype=float)
+        if (
+            len(source_columns) == 0
+            or len(baseline_map_coefficients) == 0
+            or len(baseline_pp_coefficients) == 0
+            or len(delta_map_coefficients) == 0
+            or len(delta_pp_coefficients) == 0
+        ):
+            continue
+
+        overrides[f"{prefix}_MAP_model_raw"] = [np.nan] * len(df)
+        overrides[f"{prefix}_PP_model_raw"] = [np.nan] * len(df)
+        overrides[f"{prefix}_SBP"] = [np.nan] * len(df)
+        overrides[f"{prefix}_DBP"] = [np.nan] * len(df)
+        overrides[f"{prefix}_SBP_raw"] = [np.nan] * len(df)
+        overrides[f"{prefix}_DBP_raw"] = [np.nan] * len(df)
+        overrides[f"{prefix}_MAP_raw"] = [np.nan] * len(df)
+        overrides[f"{prefix}_PP_raw"] = [np.nan] * len(df)
+        overrides[f"{prefix}_MAP_smoothed"] = [np.nan] * len(df)
+        overrides[f"{prefix}_PP_smoothed"] = [np.nan] * len(df)
+        overrides[f"{prefix}_MAP_calibrated"] = [np.nan] * len(df)
+        overrides[f"{prefix}_PP_calibrated"] = [np.nan] * len(df)
+        overrides[f"{prefix}_SBP_smoothed"] = [np.nan] * len(df)
+        overrides[f"{prefix}_DBP_smoothed"] = [np.nan] * len(df)
+        overrides[f"{prefix}_SBP_calibrated"] = [np.nan] * len(df)
+        overrides[f"{prefix}_DBP_calibrated"] = [np.nan] * len(df)
+        overrides[f"{prefix}_postprocess_applied"] = [0] * len(df)
+        for label in labels:
+            overrides[f"{prefix}_MAP_coef_{label}"] = [np.nan] * len(df)
+            overrides[f"{prefix}_PP_coef_{label}"] = [np.nan] * len(df)
+            overrides[f"{prefix}_MAP_term_{label}"] = [np.nan] * len(df)
+            overrides[f"{prefix}_PP_term_{label}"] = [np.nan] * len(df)
+            overrides[f"{prefix}_SBP_term_{label}"] = [np.nan] * len(df)
+            overrides[f"{prefix}_DBP_term_{label}"] = [np.nan] * len(df)
+        if prefix == "M2":
+            overrides["M2_SBP_base"] = [np.nan] * len(df)
+            overrides["M2_DBP_base"] = [np.nan] * len(df)
+            overrides["M2_SBP_correction"] = [np.nan] * len(df)
+            overrides["M2_DBP_correction"] = [np.nan] * len(df)
+
+        for session_id in pd.unique(session_values):
+            session_indices = list(df.index[session_values == session_id])
+            samples: list[dict[str, object]] = []
+            for index in session_indices:
+                row = df.loc[index]
+                if not _is_valid_row(row, valid_col, reject_col):
+                    continue
+                features = _feature_vector_for_prefix(prefix, row)
+                if features is None:
+                    continue
+                prediction = _predict_method(prefix, row, runtime_coefficients)
+                if prediction is None:
+                    continue
+                samples.append(
+                    {
+                        "index": index,
+                        "row": row,
+                        "features": features,
+                        "map_raw": float(prediction["map_model_raw"]),
+                        "pp_raw": float(prediction["pp_model_raw"]),
+                    }
+                )
+            if not samples:
+                continue
+
+            baseline_beats = int(_to_float(baseline_model.get("initial_baseline_beats")))
+            dynamic_anchor_beats = int(_to_float(blend_spec.get("dynamic_anchor_beats")))
+            initial_beats = baseline_beats if baseline_beats > 0 else dynamic_anchor_beats
+            initial_beats = initial_beats if initial_beats > 0 else 30
+            summary = _build_rich_summary(samples, source_columns, initial_beats)
+            if summary is None:
+                continue
+            summary_features, anchor_features = summary
+
+            population_map_anchor = _to_float(baseline_model.get("population_MAP_anchor"))
+            population_pp_anchor = _to_float(baseline_model.get("population_PP_anchor"))
+            baseline_shrinkage = _to_float(baseline_model.get("baseline_shrinkage"))
+            if not math.isfinite(baseline_shrinkage):
+                baseline_shrinkage = 1.0
+
+            baseline_map_raw = predict(baseline_map_coefficients, summary_features)
+            baseline_pp_raw = predict(baseline_pp_coefficients, summary_features)
+            baseline_map = population_map_anchor + baseline_shrinkage * (baseline_map_raw - population_map_anchor)
+            baseline_pp = population_pp_anchor + baseline_shrinkage * (baseline_pp_raw - population_pp_anchor)
+            baseline_map = _sanitize_baseline_anchor(
+                baseline_map,
+                population_map_anchor,
+                BASELINE_MAP_MIN,
+                BASELINE_MAP_MAX,
+            )
+            baseline_pp = _sanitize_baseline_anchor(
+                baseline_pp,
+                population_pp_anchor,
+                BASELINE_PP_MIN,
+                BASELINE_PP_MAX,
+            )
+
+            anchor_count = min(dynamic_anchor_beats if dynamic_anchor_beats > 0 else initial_beats, len(samples))
+            rich_raw_map_pp: list[tuple[float, float]] = []
+            for sample in samples:
+                centered = sample["features"] - anchor_features
+                rich_raw_map_pp.append(
+                    (
+                        baseline_map + predict(delta_map_coefficients, centered),
+                        baseline_pp + predict(delta_pp_coefficients, centered),
+                    )
+                )
+            rich_smoothed_map_pp = _smooth_map_pp(rich_raw_map_pp)
+            dynamic_raw_map_pp = [(float(sample["map_raw"]), float(sample["pp_raw"])) for sample in samples]
+            dynamic_smoothed_map_pp = _smooth_map_pp(dynamic_raw_map_pp)
+            dynamic_raw_anchor_map = float(np.median([value[0] for value in dynamic_raw_map_pp[:anchor_count]]))
+            dynamic_raw_anchor_pp = float(np.median([value[1] for value in dynamic_raw_map_pp[:anchor_count]]))
+            dynamic_anchor_map = float(np.median([value[0] for value in dynamic_smoothed_map_pp[:anchor_count]]))
+            dynamic_anchor_pp = float(np.median([value[1] for value in dynamic_smoothed_map_pp[:anchor_count]]))
+
+            for sample, (rich_map_raw, rich_pp_raw), (rich_map, rich_pp), (map_raw, pp_raw), (map_dynamic, pp_dynamic) in zip(
+                samples,
+                rich_raw_map_pp,
+                rich_smoothed_map_pp,
+                dynamic_raw_map_pp,
+                dynamic_smoothed_map_pp,
+            ):
+                map_smoothed_blended = rich_map + dynamic_gain_map * (map_dynamic - dynamic_anchor_map)
+                pp_smoothed_blended = rich_pp + dynamic_gain_pp * (pp_dynamic - dynamic_anchor_pp)
+                dbp_smoothed = map_smoothed_blended - pp_smoothed_blended / 3.0
+                sbp_smoothed = dbp_smoothed + pp_smoothed_blended
+                map_raw_blended = rich_map_raw + dynamic_gain_map * (map_raw - dynamic_raw_anchor_map)
+                pp_raw_blended = rich_pp_raw + dynamic_gain_pp * (pp_raw - dynamic_raw_anchor_pp)
+                dbp_raw = map_raw_blended - pp_raw_blended / 3.0
+                sbp_raw = dbp_raw + pp_raw_blended
+                position = index_positions[sample["index"]]
+                overrides[f"{prefix}_MAP_model_raw"][position] = map_raw_blended
+                overrides[f"{prefix}_PP_model_raw"][position] = pp_raw_blended
+                overrides[f"{prefix}_SBP"][position] = sbp_raw
+                overrides[f"{prefix}_DBP"][position] = dbp_raw
+                overrides[f"{prefix}_SBP_raw"][position] = sbp_raw
+                overrides[f"{prefix}_DBP_raw"][position] = dbp_raw
+                overrides[f"{prefix}_MAP_raw"][position] = map_raw_blended
+                overrides[f"{prefix}_PP_raw"][position] = pp_raw_blended
+                overrides[f"{prefix}_MAP_smoothed"][position] = map_smoothed_blended
+                overrides[f"{prefix}_PP_smoothed"][position] = pp_smoothed_blended
+                overrides[f"{prefix}_MAP_calibrated"][position] = map_smoothed_blended
+                overrides[f"{prefix}_PP_calibrated"][position] = pp_smoothed_blended
+                overrides[f"{prefix}_SBP_smoothed"][position] = sbp_smoothed
+                overrides[f"{prefix}_DBP_smoothed"][position] = dbp_smoothed
+                overrides[f"{prefix}_SBP_calibrated"][position] = sbp_smoothed
+                overrides[f"{prefix}_DBP_calibrated"][position] = dbp_smoothed
+                overrides[f"{prefix}_postprocess_applied"][position] = 1
+    return overrides
 
 
 def _predict_direct_model(
@@ -388,6 +676,9 @@ def append_runtime_map_pp_columns(
                 columns["M2_SBP_correction"].append(sbp_model_raw - base_sbp)
                 columns["M2_DBP_correction"].append(dbp_model_raw - base_dbp)
         all_columns.update(columns)
+    tracking_overrides = _tracking_blend_overrides(enriched, runtime_coefficients)
+    if tracking_overrides:
+        all_columns.update(tracking_overrides)
     if not all_columns:
         return enriched
     existing = [column for column in all_columns if column in enriched.columns]

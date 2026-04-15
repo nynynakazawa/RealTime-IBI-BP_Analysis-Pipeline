@@ -308,6 +308,21 @@ def ensure_postprocessed_columns(merged_df: pd.DataFrame) -> pd.DataFrame:
     for spec in ALL_METHOD_SPECS:
         required = {spec["sbp_col"], spec["dbp_col"], spec["valid_col"], spec["reject_col"]}
         if required.issubset(set(enriched.columns)):
+            precomputed_postprocessed = {
+                f"{spec['prefix']}_MAP_raw",
+                f"{spec['prefix']}_PP_raw",
+                f"{spec['prefix']}_MAP_smoothed",
+                f"{spec['prefix']}_PP_smoothed",
+                f"{spec['prefix']}_MAP_calibrated",
+                f"{spec['prefix']}_PP_calibrated",
+                f"{spec['prefix']}_SBP_smoothed",
+                f"{spec['prefix']}_DBP_smoothed",
+                f"{spec['prefix']}_SBP_calibrated",
+                f"{spec['prefix']}_DBP_calibrated",
+                f"{spec['prefix']}_postprocess_applied",
+            }
+            if precomputed_postprocessed.issubset(set(enriched.columns)):
+                continue
             if spec.get("already_smoothed"):
                 enriched = _ensure_identity_postprocessed_columns(
                     enriched,
