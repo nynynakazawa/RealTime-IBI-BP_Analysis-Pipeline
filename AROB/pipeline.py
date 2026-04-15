@@ -41,17 +41,28 @@ METHOD_FIXED_WINDOW_LAG: dict[str, int] = {
     # Legacy fallback (currently not used because session-adaptive alignment is enabled).
 }
 METHOD_LAG_BLEND: dict[str, float] = {
-    # Keep default full lag application unless explicitly overridden.
-    # SinBP_D benefits from partial lag application on pooled scatter tracking.
-    "SinBP_D": 0.75,
+    # Slightly partial lag blending improves pooled tracking scatter for RTBP and SinBP_M.
+    "RTBP": 0.85,
+    "SinBP_M": 0.85,
+    # SinBP_D benefits from full lag application under positive-sign constraint.
+    "SinBP_D": 1.00,
+    # Keep PPShapeC at full lag application.
+    "SinBP_D_PPShapeC": 1.00,
 }
 SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT = 8
 SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD: dict[str, int] = {
-    "SinBP_D": 5,
+    "RTBP": 10,
+    # Longer calibration for SinBP_D/PPShapeC stabilizes lag/sign estimation.
+    "SinBP_D": 8,
+    "SinBP_D_PPShapeC": 8,
     "SinBP_M": 8,
 }
 SESSION_ALIGNMENT_LAG_CANDIDATES: tuple[int, ...] = (-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6)
 SESSION_ALIGNMENT_SIGNS: tuple[float, ...] = (1.0, -1.0)
+SESSION_ALIGNMENT_SIGNS_BY_METHOD: dict[str, tuple[float, ...]] = {
+    # For SinBP_D, sign flip often collapses PP directionality.
+    "SinBP_D": (1.0,),
+}
 SESSION_ALIGNMENT_GAIN_CANDIDATES: tuple[float, ...] = (0.7, 0.85, 1.0, 1.15, 1.3)
 SESSION_ALIGNMENT_GAIN_CANDIDATES_BY_METHOD: dict[str, tuple[float, ...]] = {
     "SinBP_M": (0.55, 0.7, 0.85, 1.0, 1.15, 1.3, 1.45),
@@ -304,6 +315,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
             method_name = str(method)
             calib_windows = int(SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD.get(method_name, SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT))
             gain_candidates = SESSION_ALIGNMENT_GAIN_CANDIDATES_BY_METHOD.get(method_name, SESSION_ALIGNMENT_GAIN_CANDIDATES)
+            sign_candidates = SESSION_ALIGNMENT_SIGNS_BY_METHOD.get(method_name, SESSION_ALIGNMENT_SIGNS)
             source_map = pd.to_numeric(ordered["pred_MAP"], errors="coerce")
             source_pp = pd.to_numeric(ordered["pred_PP"], errors="coerce")
             weight_pp, weight_sbp, weight_dbp = SESSION_ALIGNMENT_PP_SCORE_WEIGHTS_BY_METHOD.get(
@@ -317,7 +329,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
                 best_sign = 1.0
                 best_gain = 1.0
                 for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
-                    for sign in SESSION_ALIGNMENT_SIGNS:
+                    for sign in sign_candidates:
                         for gain in gain_candidates:
                             candidate = _component_transform(source_map, lag, sign, gain)
                             score = _delta_corr(ordered["ref_MAP"], candidate, window_count)
@@ -341,7 +353,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
                 best_sign = 1.0
                 best_gain = 1.0
                 for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
-                    for sign in SESSION_ALIGNMENT_SIGNS:
+                    for sign in sign_candidates:
                         for gain in gain_candidates:
                             candidate = _component_transform(source_pp, lag, sign, gain)
                             sbp_candidate = map_series + (2.0 / 3.0) * candidate
