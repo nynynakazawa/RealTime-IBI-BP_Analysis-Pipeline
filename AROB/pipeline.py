@@ -58,6 +58,12 @@ SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD: dict[str, int] = {
     "SinBP_M": 8,
 }
 SESSION_ALIGNMENT_LAG_CANDIDATES: tuple[int, ...] = (-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6)
+SESSION_ALIGNMENT_LAG_CANDIDATES_BY_METHOD: dict[str, tuple[int, ...]] = {
+    # For PPShapeC, restricting lag search avoids overfitting to extreme shifts.
+    "SinBP_D_PPShapeC": (-4, -3, -2, -1, 0, 1, 2, 3, 4),
+    # SinBP_M tracks best with short lag search centered around zero.
+    "SinBP_M": (-2, -1, 0, 1, 2),
+}
 SESSION_ALIGNMENT_SIGNS: tuple[float, ...] = (1.0, -1.0)
 SESSION_ALIGNMENT_SIGNS_BY_METHOD: dict[str, tuple[float, ...]] = {
     # For SinBP_D, sign flip often collapses PP directionality.
@@ -314,6 +320,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
 
             method_name = str(method)
             calib_windows = int(SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD.get(method_name, SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT))
+            lag_candidates = SESSION_ALIGNMENT_LAG_CANDIDATES_BY_METHOD.get(method_name, SESSION_ALIGNMENT_LAG_CANDIDATES)
             gain_candidates = SESSION_ALIGNMENT_GAIN_CANDIDATES_BY_METHOD.get(method_name, SESSION_ALIGNMENT_GAIN_CANDIDATES)
             sign_candidates = SESSION_ALIGNMENT_SIGNS_BY_METHOD.get(method_name, SESSION_ALIGNMENT_SIGNS)
             source_map = pd.to_numeric(ordered["pred_MAP"], errors="coerce")
@@ -328,7 +335,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
                 best_lag = 0
                 best_sign = 1.0
                 best_gain = 1.0
-                for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
+                for lag in lag_candidates:
                     for sign in sign_candidates:
                         for gain in gain_candidates:
                             candidate = _component_transform(source_map, lag, sign, gain)
@@ -352,7 +359,7 @@ def _apply_window_lag_alignment(windowed_df: pd.DataFrame) -> pd.DataFrame:
                 best_lag = 0
                 best_sign = 1.0
                 best_gain = 1.0
-                for lag in SESSION_ALIGNMENT_LAG_CANDIDATES:
+                for lag in lag_candidates:
                     for sign in sign_candidates:
                         for gain in gain_candidates:
                             candidate = _component_transform(source_pp, lag, sign, gain)
