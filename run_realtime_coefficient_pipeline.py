@@ -4,7 +4,8 @@ from __future__ import annotations
 
 This wrapper intentionally stays thin:
 - source of truth is `Analysis/Data/realtime_sessions/`
-- coefficient candidates remain exploratory until `Analysis/AROB/` re-evaluates them
+- active methods are fixed to `RTBP / SinBP_D / SinBP_M`
+- baseline-family experimental branches are preserved in code but disabled by default
 """
 
 from BP_Analysis.fit_realtime_map_pp_coefficients import main

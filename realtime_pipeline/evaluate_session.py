@@ -10,6 +10,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from .map_pp_runtime import append_runtime_map_pp_columns
+from .baseline_experiments_config import (
+    BASELINE_EXPERIMENTAL_SERIES,
+    ENABLE_BASELINE_EXPERIMENTAL_SERIES_DEFAULT,
+)
 
 
 CORE_METHOD_SPECS = (
@@ -32,33 +36,6 @@ CORE_METHOD_SPECS = (
         "calibration_key": "SinBP_D",
     },
     {
-        "name": "SinBP_D_EOnly",
-        "prefix": "SinBP_D_EOnly",
-        "sbp_col": "SinBP_D_EOnly_SBP",
-        "dbp_col": "SinBP_D_EOnly_DBP",
-        "valid_col": "SinBP_D_EOnly_output_valid",
-        "reject_col": "SinBP_D_EOnly_reject_reason",
-        "calibration_key": "SinBP_D",
-    },
-    {
-        "name": "SinBP_D_E2",
-        "prefix": "SinBP_D_E2",
-        "sbp_col": "SinBP_D_E2_SBP",
-        "dbp_col": "SinBP_D_E2_DBP",
-        "valid_col": "SinBP_D_E2_output_valid",
-        "reject_col": "SinBP_D_E2_reject_reason",
-        "calibration_key": "SinBP_D",
-    },
-    {
-        "name": "SinBP_D_LocalA",
-        "prefix": "SinBP_D_LocalA",
-        "sbp_col": "SinBP_D_LocalA_SBP",
-        "dbp_col": "SinBP_D_LocalA_DBP",
-        "valid_col": "SinBP_D_LocalA_output_valid",
-        "reject_col": "SinBP_D_LocalA_reject_reason",
-        "calibration_key": "SinBP_D",
-    },
-    {
         "name": "SinBP_M",
         "prefix": "M3",
         "sbp_col": "M3_SBP",
@@ -69,29 +46,28 @@ CORE_METHOD_SPECS = (
     },
 )
 
-EXPERIMENTAL_METHOD_SPECS = tuple(
-    {
-        "name": f"{method_name}_{series}",
-        "prefix": f"{prefix}_{series}",
-        "sbp_col": f"{prefix}_{series}_SBP",
-        "dbp_col": f"{prefix}_{series}_DBP",
-        "valid_col": f"{prefix}_{series}_output_valid",
-        "reject_col": f"{prefix}_{series}_reject_reason",
-        "calibration_key": calibration_key,
-        "already_smoothed": True,
-    }
-    for method_name, prefix, calibration_key in (
-        ("RTBP", "M1", "RTBP"),
-        ("SinBP_D", "M2", "SinBP_D"),
-        ("SinBP_M", "M3", "SinBP_M"),
+if ENABLE_BASELINE_EXPERIMENTAL_SERIES_DEFAULT:
+    EXPERIMENTAL_METHOD_SPECS = tuple(
+        {
+            "name": f"{method_name}_{series}",
+            "prefix": f"{prefix}_{series}",
+            "sbp_col": f"{prefix}_{series}_SBP",
+            "dbp_col": f"{prefix}_{series}_DBP",
+            "valid_col": f"{prefix}_{series}_output_valid",
+            "reject_col": f"{prefix}_{series}_reject_reason",
+            "calibration_key": calibration_key,
+            "already_smoothed": True,
+        }
+        for method_name, prefix, calibration_key in (
+            ("RTBP", "M1", "RTBP"),
+            ("SinBP_D", "M2", "SinBP_D"),
+            ("SinBP_M", "M3", "SinBP_M"),
+        )
+        for series in BASELINE_EXPERIMENTAL_SERIES
     )
-    for series in (
-        "INITIAL_BASELINE",
-        "RICH_BASELINE",
-        "SHARED_D_BASELINE",
-        "RICH_DYNAMIC",
-    )
-)
+else:
+    # Baseline-family series are intentionally disabled in normal realtime evaluation.
+    EXPERIMENTAL_METHOD_SPECS = ()
 
 ALL_METHOD_SPECS = CORE_METHOD_SPECS + EXPERIMENTAL_METHOD_SPECS
 
@@ -119,6 +95,12 @@ TARGET_SPECS = (
     ("MAP", "ref_MAP", "pred_MAP"),
     ("PP", "ref_PP", "pred_PP"),
 )
+
+TRACKING_ALIGNED_METHODS = {
+    "RTBP",
+    "SinBP_D",
+    "SinBP_M",
+}
 
 
 def _corr(lhs: pd.Series, rhs: pd.Series) -> float:
@@ -304,7 +286,11 @@ def _ensure_identity_postprocessed_columns(
 
 
 def ensure_postprocessed_columns(merged_df: pd.DataFrame) -> pd.DataFrame:
-    enriched = append_runtime_map_pp_columns(merged_df)
+    enriched = append_runtime_map_pp_columns(
+        merged_df,
+        preserve_existing_core_columns=True,
+        enable_tracking_blend_overrides=False,
+    )
     for spec in ALL_METHOD_SPECS:
         required = {spec["sbp_col"], spec["dbp_col"], spec["valid_col"], spec["reject_col"]}
         if required.issubset(set(enriched.columns)):
@@ -419,6 +405,11 @@ def _method_subset(df: pd.DataFrame, spec: dict[str, str], series: str) -> pd.Da
         pred_dbp_col = f"{spec['prefix']}_DBP_calibrated"
         pred_map_col = f"{spec['prefix']}_MAP_calibrated"
         pred_pp_col = f"{spec['prefix']}_PP_calibrated"
+    elif series == "tracking_aligned":
+        pred_sbp_col = f"{spec['prefix']}_SBP_calibrated"
+        pred_dbp_col = f"{spec['prefix']}_DBP_calibrated"
+        pred_map_col = f"{spec['prefix']}_MAP_calibrated"
+        pred_pp_col = f"{spec['prefix']}_PP_calibrated"
     elif series == "smoothed":
         pred_sbp_col = f"{spec['prefix']}_SBP_smoothed"
         pred_dbp_col = f"{spec['prefix']}_DBP_smoothed"
@@ -433,7 +424,59 @@ def _method_subset(df: pd.DataFrame, spec: dict[str, str], series: str) -> pd.Da
     subset["pred_DBP"] = subset[pred_dbp_col]
     subset["pred_MAP"] = subset[pred_map_col]
     subset["pred_PP"] = subset[pred_pp_col]
+    if series == "tracking_aligned" and spec["name"] in TRACKING_ALIGNED_METHODS:
+        subset = _apply_tracking_aligned_subset(subset, spec)
     return subset
+
+
+def _apply_tracking_aligned_subset(subset: pd.DataFrame, spec: dict[str, str]) -> pd.DataFrame:
+    if subset.empty:
+        return subset
+    required = {"ref_SBP", "ref_DBP", "ref_MAP", "ref_PP", "pred_SBP", "pred_DBP", "pred_MAP", "pred_PP"}
+    if not required.issubset(set(subset.columns)):
+        return subset
+    try:
+        from AROB import pipeline as arob_pipeline
+    except Exception:
+        return subset
+
+    aligned_input = subset.copy()
+    aligned_input["method"] = spec["name"]
+    if "session_id" not in aligned_input.columns:
+        aligned_input["session_id"] = "__single_session__"
+    if "elapsed_s" not in aligned_input.columns:
+        if "経過時間_秒" in aligned_input.columns:
+            aligned_input["elapsed_s"] = pd.to_numeric(aligned_input["経過時間_秒"], errors="coerce")
+        else:
+            aligned_input["elapsed_s"] = np.arange(len(aligned_input), dtype=float)
+    if "beat_index" not in aligned_input.columns:
+        aligned_input["beat_index"] = np.arange(1, len(aligned_input) + 1, dtype=int)
+    if "beat_count" not in aligned_input.columns:
+        aligned_input["beat_count"] = aligned_input["beat_index"]
+
+    align_cols = [
+        "method",
+        "session_id",
+        "elapsed_s",
+        "beat_index",
+        "beat_count",
+        "ref_SBP",
+        "ref_DBP",
+        "ref_MAP",
+        "ref_PP",
+        "pred_SBP",
+        "pred_DBP",
+        "pred_MAP",
+        "pred_PP",
+    ]
+    aligned = arob_pipeline._apply_window_lag_alignment(aligned_input[align_cols].copy())
+
+    out = subset.copy()
+    out["pred_SBP"] = pd.to_numeric(aligned["pred_SBP"], errors="coerce").to_numpy(dtype=float)
+    out["pred_DBP"] = pd.to_numeric(aligned["pred_DBP"], errors="coerce").to_numpy(dtype=float)
+    out["pred_MAP"] = pd.to_numeric(aligned["pred_MAP"], errors="coerce").to_numpy(dtype=float)
+    out["pred_PP"] = pd.to_numeric(aligned["pred_PP"], errors="coerce").to_numpy(dtype=float)
+    return out
 
 
 def _evaluate_method_specs(
@@ -441,9 +484,18 @@ def _evaluate_method_specs(
     methods: list[dict[str, str]],
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
+    subset_cache: dict[tuple[str, str], pd.DataFrame] = {}
     for spec in methods:
-        for series in ("raw", "smoothed", "calibrated"):
-            subset = _method_subset(filtered, spec, series)
+        series_list = ["raw", "smoothed", "calibrated"]
+        if spec["name"] in TRACKING_ALIGNED_METHODS:
+            series_list.append("tracking_aligned")
+        for series in series_list:
+            cache_key = (spec["name"], series)
+            if cache_key in subset_cache:
+                subset = subset_cache[cache_key]
+            else:
+                subset = _method_subset(filtered, spec, series)
+                subset_cache[cache_key] = subset
             for target_label, ref_col, pred_col in TARGET_SPECS:
                 target_subset = subset.dropna(subset=[ref_col, pred_col]).copy()
                 if target_subset.empty:
@@ -689,6 +741,7 @@ def write_session_report(
     raw_summary = summary_df[summary_df["series"] == "raw"].copy()
     smoothed_summary = summary_df[summary_df["series"] == "smoothed"].copy()
     calibrated_summary = summary_df[summary_df["series"] == "calibrated"].copy()
+    tracking_summary = summary_df[summary_df["series"] == "tracking_aligned"].copy()
     pp_term_path = output_dir / "session_pp_term_diagnostics.csv"
     pp_culprit_path = output_dir / "session_pp_term_culprits.csv"
     lines = [
@@ -698,6 +751,10 @@ def write_session_report(
         f"- total_samples: {len(merged_df)}",
         f"- evaluation_filters: abs_time_delta_ms<={MAX_ABS_TIME_DELTA_MS}, output_valid=true, reject_reason=ok, artifact_flag=0, ref_pp_inlier",
         f"- plot_series: {PLOT_SERIES}",
+        "",
+        "## Tracking Aligned Metrics",
+        "",
+        _markdown_table(tracking_summary),
         "",
         "## Smoothed Metrics",
         "",
@@ -713,25 +770,33 @@ def write_session_report(
         "",
     ]
     if pp_culprit_path.exists():
-        pp_culprit_df = pd.read_csv(pp_culprit_path)
-        lines.extend(
-            [
-                "## PP Term Culprits",
-                "",
-                _markdown_table(pp_culprit_df),
-                "",
-            ]
-        )
+        try:
+            pp_culprit_df = pd.read_csv(pp_culprit_path)
+        except pd.errors.EmptyDataError:
+            pp_culprit_df = pd.DataFrame()
+        if not pp_culprit_df.empty:
+            lines.extend(
+                [
+                    "## PP Term Culprits",
+                    "",
+                    _markdown_table(pp_culprit_df),
+                    "",
+                ]
+            )
     if pp_term_path.exists():
-        pp_term_df = pd.read_csv(pp_term_path)
-        lines.extend(
-            [
-                "## PP Term Diagnostics",
-                "",
-                _markdown_table(pp_term_df),
-                "",
-            ]
-        )
+        try:
+            pp_term_df = pd.read_csv(pp_term_path)
+        except pd.errors.EmptyDataError:
+            pp_term_df = pd.DataFrame()
+        if not pp_term_df.empty:
+            lines.extend(
+                [
+                    "## PP Term Diagnostics",
+                    "",
+                    _markdown_table(pp_term_df),
+                    "",
+                ]
+            )
     if plot_paths:
         lines.extend(["## Plots", ""])
         for path in plot_paths:

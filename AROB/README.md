@@ -24,6 +24,8 @@ AROB 論文用の追従重視解析をここに分離する。
 
 ```bash
 python3 Analysis/run_arob_tracking_analysis.py
+python3 Analysis/run_arob_tracking_analysis.py --no-plots
+python3 Analysis/run_arob_tracking_analysis.py --output-root Analysis/Data/arob_tracking
 ```
 
 出力先:

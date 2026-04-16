@@ -139,25 +139,13 @@ DIAGNOSTIC_METHOD_SPECS: tuple[MethodSpec, ...] = (
     ),
 )
 
-SUPPLEMENTAL_METHOD_SPECS: tuple[MethodSpec, ...] = (
-    MethodSpec(
-        name="SinBP_D_PPShapeC",
-        label="sinBP(D-PP-C)",
-        prefix="M2PPC",
-        sbp_col="M2PPC_SBP_calibrated",
-        dbp_col="M2PPC_DBP_calibrated",
-        map_col="M2PPC_MAP_calibrated",
-        pp_col="M2PPC_PP_calibrated",
-        output_valid_col="M2PPC_output_valid",
-        reject_reason_col="M2PPC_reject_reason",
-    ),
-)
+SUPPLEMENTAL_METHOD_SPECS: tuple[MethodSpec, ...] = ()
 
 # NOTE:
 # Keep diagnostic specs defined for optional offline experiments, but
 # exclude them from the default AROB tracking run.
 # Active comparison series are intentionally limited to:
-# RTBP / SinBP_M / SinBP_D / SinBP_D_PPShapeC.
+# RTBP / SinBP_M / SinBP_D.
 METHOD_SPECS: tuple[MethodSpec, ...] = CORE_METHOD_SPECS + SUPPLEMENTAL_METHOD_SPECS
 METHOD_SPEC_BY_NAME: dict[str, MethodSpec] = {spec.name: spec for spec in METHOD_SPECS}
 PAPER_METHOD_SPECS: tuple[MethodSpec, ...] = tuple(METHOD_SPEC_BY_NAME[name] for name in PAPER_METHOD_NAMES)

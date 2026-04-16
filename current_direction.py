@@ -12,8 +12,8 @@ CNAP_AUXILIARY_ROOT = DATA_ROOT / "pdp" / "realtime_aux"
 AROB_TRACKING_ROOT = DATA_ROOT / "arob_tracking"
 REALTIME_COEFFICIENT_ROOT = DATA_ROOT / "realtime_coefficient"
 
-CURRENT_AROB_TRACKING_RUN = AROB_TRACKING_ROOT / "tracking_eval_20260415_211025"
-CURRENT_REALTIME_COEFFICIENT_RUN = REALTIME_COEFFICIENT_ROOT / "realtime_map_pp_fit_20260414_160022"
+CURRENT_AROB_TRACKING_RUN = AROB_TRACKING_ROOT / "tracking_eval_20260416_103134"
+CURRENT_REALTIME_COEFFICIENT_RUN = REALTIME_COEFFICIENT_ROOT / "realtime_map_pp_fit_20260416_102539"
 
 PRIMARY_TASK_DEFINITION = "within-session blood pressure tracking"
 PRIMARY_METRICS: tuple[str, ...] = (
@@ -34,9 +34,8 @@ PAPER_CORE_METHOD_NAMES: tuple[str, ...] = (
     "SinBP_D",
 )
 
-PAPER_SUPPLEMENTAL_METHOD_NAMES: tuple[str, ...] = (
-    "SinBP_D_PPShapeC",
-)
+# PPShapeC is disabled from the active paper/replay comparison set.
+PAPER_SUPPLEMENTAL_METHOD_NAMES: tuple[str, ...] = ()
 
 PAPER_METHOD_NAMES: tuple[str, ...] = PAPER_CORE_METHOD_NAMES + PAPER_SUPPLEMENTAL_METHOD_NAMES
 

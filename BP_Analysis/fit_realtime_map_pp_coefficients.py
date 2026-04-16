@@ -10,6 +10,11 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from realtime_pipeline.session_filtered_input import ensure_session_input_filtered, session_input_filtered_path
+try:
+    from .baseline_experiments_config import ENABLE_BASELINE_EXPERIMENTS_DEFAULT
+except ImportError:
+    from baseline_experiments_config import ENABLE_BASELINE_EXPERIMENTS_DEFAULT
 
 
 
@@ -30,20 +35,10 @@ EVALUATION_FILTERS = (
     f"abs_time_delta_ms<={MAX_ABS_TIME_DELTA_MS}, output_valid, "
     "reject_reason=ok, artifact_flag=0, ref_pp_inlier"
 )
-SERIES_ORDER = (
-    "current_app_smoothed",
-    "refit_map_pp_smoothed",
-    "smartphone_initial_baseline",
-    "smartphone_rich_baseline",
-    "smartphone_rich_dynamic_blend",
-    "smartphone_shared_sinbpd_baseline",
-    "smartphone_shared_sinbpd_baseline_loso",
-    "smartphone_rich_dynamic_blend_loso",
-    "smartphone_rich_baseline_loso",
-    "smartphone_initial_baseline_loso",
-    "leave_one_session_out",
-)
-METHOD_ORDER = ("RTBP", "SinBP_D", "SinBP_D_EOnly", "SinBP_D_E2", "SinBP_D_LocalA", "SinBP_M")
+# Active default comparison set (paper/realtime): only core three series.
+# Baseline-family series are optional and enabled only with --enable-baseline-experiments.
+SERIES_ORDER = ("current_app_smoothed", "refit_map_pp_smoothed", "leave_one_session_out")
+METHOD_ORDER = ("RTBP", "SinBP_D", "SinBP_M")
 REFIT_METHOD_ORDER = ("RTBP", "SinBP_D", "SinBP_M")
 PLOT_METHOD_ORDER = ("RTBP", "SinBP_D", "SinBP_M")
 
@@ -59,24 +54,6 @@ PP_SCALE_FIT_RIDGE_ALPHA = 25.0
 BASELINE_METHOD_SPECS = {
     "RTBP": ("M1_SBP_smoothed", "M1_DBP_smoothed", "M1_output_valid", "M1_reject_reason"),
     "SinBP_D": ("M2_SBP_smoothed", "M2_DBP_smoothed", "M2_output_valid", "M2_reject_reason"),
-    "SinBP_D_EOnly": (
-        "SinBP_D_EOnly_SBP_smoothed",
-        "SinBP_D_EOnly_DBP_smoothed",
-        "SinBP_D_EOnly_output_valid",
-        "SinBP_D_EOnly_reject_reason",
-    ),
-    "SinBP_D_E2": (
-        "SinBP_D_E2_SBP_smoothed",
-        "SinBP_D_E2_DBP_smoothed",
-        "SinBP_D_E2_output_valid",
-        "SinBP_D_E2_reject_reason",
-    ),
-    "SinBP_D_LocalA": (
-        "SinBP_D_LocalA_SBP_smoothed",
-        "SinBP_D_LocalA_DBP_smoothed",
-        "SinBP_D_LocalA_output_valid",
-        "SinBP_D_LocalA_reject_reason",
-    ),
     "SinBP_M": ("M3_SBP_smoothed", "M3_DBP_smoothed", "M3_output_valid", "M3_reject_reason"),
 }
 
@@ -411,56 +388,27 @@ def _load_csv(path: Path) -> list[dict[str, str]]:
 
 
 def _session_dirs(root: Path) -> list[Path]:
-    return sorted(path for path in root.iterdir() if path.is_dir() and (path / f"{path.name}_merged.csv").exists())
-
-
-def _ref_pp_bounds(rows: list[dict[str, str]]) -> tuple[float, float]:
-    ref_pp_values: list[float] = []
-    for row in rows:
-        ref_sbp = _to_float(row.get("ref_SBP"))
-        ref_dbp = _to_float(row.get("ref_DBP"))
-        if not math.isfinite(ref_sbp) or not math.isfinite(ref_dbp):
-            continue
-        abs_dt = _to_float(row.get("abs_time_delta_ms"))
-        if math.isfinite(abs_dt) and abs_dt > MAX_ABS_TIME_DELTA_MS:
-            continue
-        if _to_int(row.get("artifact_flag")) != 0:
-            continue
-        ref_pp_values.append(ref_sbp - ref_dbp)
-    if not ref_pp_values:
-        return MIN_REF_PP, MAX_REF_PP
-
-    values = np.array(ref_pp_values, dtype=float)
-    median = float(np.median(values))
-    mad = float(np.median(np.abs(values - median)))
-    band = max(REF_PP_MIN_BAND, REF_PP_SIGMA_MULTIPLIER * 1.4826 * mad)
-    return max(MIN_REF_PP, median - band), min(MAX_REF_PP, median + band)
-
-
-def _row_passes_reference_filters(row: dict[str, str], ref_pp_lower: float, ref_pp_upper: float) -> bool:
-    ref_sbp = _to_float(row.get("ref_SBP"))
-    ref_dbp = _to_float(row.get("ref_DBP"))
-    if not math.isfinite(ref_sbp) or not math.isfinite(ref_dbp):
-        return False
-    abs_dt = _to_float(row.get("abs_time_delta_ms"))
-    if math.isfinite(abs_dt) and abs_dt > MAX_ABS_TIME_DELTA_MS:
-        return False
-    if _to_int(row.get("artifact_flag")) != 0:
-        return False
-    return ref_pp_lower <= ref_sbp - ref_dbp <= ref_pp_upper
+    return sorted(
+        path
+        for path in root.iterdir()
+        if path.is_dir()
+        and ((path / f"{path.name}_merged.csv").exists() or session_input_filtered_path(path).exists())
+    )
 
 
 def load_reference_rows(sessions_root: Path) -> list[dict[str, str]]:
+    # Single source of truth for preprocessing:
+    # use the same beat-level filtered table as realtime session evaluation and AROB.
     reference_rows: list[dict[str, str]] = []
     for session_dir in _session_dirs(sessions_root):
-        rows = _load_csv(session_dir / f"{session_dir.name}_merged.csv")
-        ref_pp_lower, ref_pp_upper = _ref_pp_bounds(rows)
+        filtered_csv = ensure_session_input_filtered(session_dir)
+        rows = _load_csv(filtered_csv)
         for row_index, row in enumerate(rows):
-            if not _row_passes_reference_filters(row, ref_pp_lower, ref_pp_upper):
-                continue
             enriched = dict(row)
             ref_sbp = _to_float(enriched.get("ref_SBP"))
             ref_dbp = _to_float(enriched.get("ref_DBP"))
+            if not math.isfinite(ref_sbp) or not math.isfinite(ref_dbp):
+                continue
             enriched["_session"] = session_dir.name
             enriched["_row_index"] = str(row_index)
             enriched["_ref_MAP"] = str((ref_sbp + 2.0 * ref_dbp) / 3.0)
@@ -1529,6 +1477,22 @@ def generate_timeseries_plots(
         "smartphone_rich_dynamic_blend": (0, (5, 1)),
         "smartphone_shared_sinbpd_baseline": (0, (3, 1, 1, 1)),
     }
+    series_to_file_label = {
+        "current_app_smoothed": "current",
+        "refit_map_pp_smoothed": "new",
+        "smartphone_initial_baseline": "baseline_adaptive",
+        "smartphone_rich_baseline": "rich_baseline",
+        "smartphone_rich_dynamic_blend": "rich_dynamic",
+        "smartphone_shared_sinbpd_baseline": "shared_d_baseline",
+    }
+    series_to_plot_label = {
+        "current_app_smoothed": "current",
+        "refit_map_pp_smoothed": "new",
+        "smartphone_initial_baseline": "baseline-adaptive",
+        "smartphone_rich_baseline": "rich-baseline",
+        "smartphone_rich_dynamic_blend": "rich+dynamic",
+        "smartphone_shared_sinbpd_baseline": "shared-D-baseline",
+    }
 
     for session in sessions:
         session_rows = [row for _, rows in plot_groups for row in rows if row["session"] == session]
@@ -1545,9 +1509,16 @@ def generate_timeseries_plots(
             ("MAP", "ref_MAP", "pred_MAP", "map"),
             ("PP", "ref_PP", "pred_PP", "pp"),
         ):
-            fig, ax = plt.subplots(figsize=(12, 5), dpi=150)
-            ax.plot(x_ref, [float(row[ref_key]) for row in ref_rows], label=f"CNAP {target}", color="#111111", linewidth=2.4)
             for series, rows in plot_groups:
+                fig, ax = plt.subplots(figsize=(12, 5), dpi=150)
+                ax.plot(
+                    x_ref,
+                    [float(row[ref_key]) for row in ref_rows],
+                    label=f"CNAP {target}",
+                    color="#111111",
+                    linewidth=2.4,
+                )
+                plotted = False
                 for method in PLOT_METHOD_ORDER:
                     method_rows = sorted(
                         [row for row in rows if row["session"] == session and row["method"] == method],
@@ -1555,38 +1526,30 @@ def generate_timeseries_plots(
                     )
                     if not method_rows:
                         continue
-                    if series == "refit_map_pp_smoothed":
-                        series_label = "new"
-                    elif series == "smartphone_initial_baseline":
-                        series_label = "baseline-adaptive"
-                    elif series == "smartphone_rich_baseline":
-                        series_label = "rich-baseline"
-                    elif series == "smartphone_rich_dynamic_blend":
-                        series_label = "rich+dynamic"
-                    elif series == "smartphone_shared_sinbpd_baseline":
-                        series_label = "shared-D-baseline"
-                    else:
-                        series_label = "current"
-                    label = f"{method} {series_label}"
+                    plotted = True
+                    label = f"{method} {series_to_plot_label.get(series, series)}"
                     ax.plot(
                         [_x_value(row) for row in method_rows],
                         [float(row[pred_key]) for row in method_rows],
                         label=label,
                         color=colors[method],
                         linestyle=line_styles[series],
-                        linewidth=1.3,
-                        alpha=0.82 if series == "refit_map_pp_smoothed" else 0.50,
+                        linewidth=1.4,
+                        alpha=0.84 if series == "refit_map_pp_smoothed" else 0.62,
                     )
-            ax.set_xlabel("Elapsed Time (s)")
-            ax.set_ylabel(f"{target} (mmHg)")
-            ax.set_title(f"{session} {target} Time Series")
-            ax.grid(True, linestyle="--", alpha=0.3)
-            ax.legend(ncol=2, fontsize=8)
-            fig.tight_layout()
-            out = output_dir / f"{session}_{suffix}_timeseries.png"
-            fig.savefig(out, bbox_inches="tight")
-            plt.close(fig)
-            outputs.append(out)
+                if not plotted:
+                    plt.close(fig)
+                    continue
+                ax.set_xlabel("Elapsed Time (s)")
+                ax.set_ylabel(f"{target} (mmHg)")
+                ax.set_title(f"{session} {target} Time Series ({series_to_plot_label.get(series, series)})")
+                ax.grid(True, linestyle="--", alpha=0.3)
+                ax.legend(ncol=2, fontsize=8)
+                fig.tight_layout()
+                out = output_dir / f"{session}_{series_to_file_label.get(series, series)}_{suffix}_timeseries.png"
+                fig.savefig(out, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(out)
     return outputs
 
 
@@ -1640,29 +1603,10 @@ def coefficients_payload(models: FittedModels, sessions_root: Path, ridge_alpha:
         models.sinbpd_combined_pp_term_scales,
     )
     sinbpm_pp = _apply_pp_term_scales(models.sinbpm_pp, SINBPM_TERM_LABELS, models.sinbpm_pp_term_scales)
-    sinbpd_eonly_pp = _apply_pp_term_scales(
-        models.sinbpd_eonly_pp,
-        SINBPD_EONLY_TERM_LABELS,
-        models.sinbpd_eonly_pp_term_scales,
-    )
-    sinbpd_e2_pp = _apply_pp_term_scales(
-        models.sinbpd_e2_pp,
-        SINBPD_E2_TERM_LABELS,
-        models.sinbpd_e2_pp_term_scales,
-    )
-    sinbpd_locala_pp = _apply_pp_term_scales(
-        models.sinbpd_locala_pp,
-        SINBPD_LOCALA_TERM_LABELS,
-        models.sinbpd_locala_pp_term_scales,
-    )
-
     rtbp_sbp, rtbp_dbp = map_pp_to_sbp_dbp(models.rtbp_map, rtbp_pp)
     sinbpm_sbp, sinbpm_dbp = map_pp_to_sbp_dbp(models.sinbpm_map, sinbpm_pp)
     sinbpd_sbp, sinbpd_dbp = map_pp_to_sbp_dbp(models.sinbpd_combined_map, sinbpd_combined_pp)
     sinbpd_gamma, sinbpd_delta = map_pp_to_sbp_dbp(models.sinbpd_residual_map, models.sinbpd_residual_pp)
-    sinbpd_eonly_sbp, sinbpd_eonly_dbp = map_pp_to_sbp_dbp(models.sinbpd_eonly_map, sinbpd_eonly_pp)
-    sinbpd_e2_sbp, sinbpd_e2_dbp = map_pp_to_sbp_dbp(models.sinbpd_e2_map, sinbpd_e2_pp)
-    sinbpd_locala_sbp, sinbpd_locala_dbp = map_pp_to_sbp_dbp(models.sinbpd_locala_map, sinbpd_locala_pp)
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "sessions_root": str(sessions_root),
@@ -1693,33 +1637,6 @@ def coefficients_payload(models: FittedModels, sessions_root: Path, ridge_alpha:
                 "GAMMA_SBP_correction": sinbpd_gamma.tolist(),
                 "DELTA_DBP_correction": sinbpd_delta.tolist(),
                 "pp_term_scales": models.sinbpd_combined_pp_term_scales,
-            },
-            "SinBP_D_EOnly": {
-                "features": list(SINBP_D_EONLY.feature_cols),
-                "MAP": models.sinbpd_eonly_map.tolist(),
-                "PP": models.sinbpd_eonly_pp.tolist(),
-                "PP_effective": sinbpd_eonly_pp.tolist(),
-                "SBP": sinbpd_eonly_sbp.tolist(),
-                "DBP": sinbpd_eonly_dbp.tolist(),
-                "pp_term_scales": models.sinbpd_eonly_pp_term_scales,
-            },
-            "SinBP_D_E2": {
-                "features": list(SINBP_D_E2.feature_cols),
-                "MAP": models.sinbpd_e2_map.tolist(),
-                "PP": models.sinbpd_e2_pp.tolist(),
-                "PP_effective": sinbpd_e2_pp.tolist(),
-                "SBP": sinbpd_e2_sbp.tolist(),
-                "DBP": sinbpd_e2_dbp.tolist(),
-                "pp_term_scales": models.sinbpd_e2_pp_term_scales,
-            },
-            "SinBP_D_LocalA": {
-                "features": list(SINBP_D_LOCALA.feature_cols),
-                "MAP": models.sinbpd_locala_map.tolist(),
-                "PP": models.sinbpd_locala_pp.tolist(),
-                "PP_effective": sinbpd_locala_pp.tolist(),
-                "SBP": sinbpd_locala_sbp.tolist(),
-                "DBP": sinbpd_locala_dbp.tolist(),
-                "pp_term_scales": models.sinbpd_locala_pp_term_scales,
             },
             "SinBP_M": {
                 "features": list(SINBP_M.feature_cols),
@@ -1787,7 +1704,13 @@ def main() -> int:
     parser.add_argument("--baseline-shrinkage", type=float, default=DEFAULT_BASELINE_SHRINKAGE)
     parser.add_argument("--dynamic-blend-gain-map", type=float, default=DEFAULT_DYNAMIC_BLEND_GAIN)
     parser.add_argument("--dynamic-blend-gain-pp", type=float, default=DEFAULT_DYNAMIC_BLEND_GAIN)
+    parser.add_argument(
+        "--enable-baseline-experiments",
+        action="store_true",
+        help="Enable optional smartphone-only baseline experiment branches (disabled by default).",
+    )
     args = parser.parse_args()
+    enable_baseline_experiments = bool(args.enable_baseline_experiments or ENABLE_BASELINE_EXPERIMENTS_DEFAULT)
 
     rows = load_reference_rows(args.sessions_root)
     if not rows:
@@ -1812,204 +1735,235 @@ def main() -> int:
 
     all_sessions = set(sessions)
     models = train_models(samples_by_method, all_sessions, args.ridge_alpha)
-    adaptive_models = train_adaptive_models(
-        samples_by_method,
-        all_sessions,
-        baseline_ridge_alpha=args.baseline_ridge_alpha,
-        delta_ridge_alpha=args.ridge_alpha,
-        baseline_shrinkage=args.baseline_shrinkage,
-    )
-    rich_baseline_models = train_rich_baseline_models(
-        samples_by_method,
-        all_sessions,
-        baseline_ridge_alpha=args.rich_baseline_ridge_alpha,
-        delta_ridge_alpha=args.ridge_alpha,
-        baseline_shrinkage=args.baseline_shrinkage,
-    )
-    shared_sinbpd_baseline_models = train_shared_sinbpd_baseline_models(
-        samples_by_method,
-        all_sessions,
-        baseline_ridge_alpha=args.rich_baseline_ridge_alpha,
-        delta_ridge_alpha=args.ridge_alpha,
-        baseline_shrinkage=args.baseline_shrinkage,
-    )
     baseline_predictions = baseline_smoothed_predictions(rows, all_sessions)
     predictions = replay_model(models, samples_by_method, all_sessions)
-    adaptive_predictions = replay_adaptive_model(
-        adaptive_models,
-        samples_by_method,
-        all_sessions,
-        series="smartphone_initial_baseline",
-    )
-    rich_baseline_predictions = replay_adaptive_model(
-        rich_baseline_models,
-        samples_by_method,
-        all_sessions,
-        series="smartphone_rich_baseline",
-        rich_summary=True,
-    )
-    rich_dynamic_blend_predictions = replay_baseline_dynamic_blend(
-        rich_baseline_models,
-        models,
-        samples_by_method,
-        all_sessions,
-        series="smartphone_rich_dynamic_blend",
-        dynamic_gain_map=args.dynamic_blend_gain_map,
-        dynamic_gain_pp=args.dynamic_blend_gain_pp,
-        rich_summary=True,
-    )
-    shared_sinbpd_baseline_predictions = replay_adaptive_model(
-        shared_sinbpd_baseline_models,
-        samples_by_method,
-        all_sessions,
-        series="smartphone_shared_sinbpd_baseline",
-        rich_summary=True,
-    )
     baseline_summary = build_summary(baseline_predictions, "current_app_smoothed")
     summary = build_summary(predictions, "all_sessions_fit")
-    adaptive_summary = build_summary(adaptive_predictions, "smartphone_initial_baseline")
-    rich_baseline_summary = build_summary(rich_baseline_predictions, "smartphone_rich_baseline")
-    rich_dynamic_blend_summary = build_summary(rich_dynamic_blend_predictions, "smartphone_rich_dynamic_blend")
-    shared_sinbpd_baseline_summary = build_summary(
-        shared_sinbpd_baseline_predictions,
-        "smartphone_shared_sinbpd_baseline",
-    )
 
     loso_predictions: list[dict[str, object]] = []
-    adaptive_loso_predictions: list[dict[str, object]] = []
-    rich_baseline_loso_predictions: list[dict[str, object]] = []
-    rich_dynamic_blend_loso_predictions: list[dict[str, object]] = []
-    shared_sinbpd_baseline_loso_predictions: list[dict[str, object]] = []
     for held_out in sessions:
         loso_models = train_models(samples_by_method, all_sessions - {held_out}, args.ridge_alpha)
         for row in replay_model(loso_models, samples_by_method, {held_out}):
             row = dict(row)
             row["held_out_session"] = held_out
             loso_predictions.append(row)
-        adaptive_loso_models = train_adaptive_models(
+    loso_summary = build_summary(loso_predictions, "leave_one_session_out")
+    adaptive_models = None
+    rich_baseline_models = None
+    shared_sinbpd_baseline_models = None
+    adaptive_predictions: list[dict[str, object]] = []
+    rich_baseline_predictions: list[dict[str, object]] = []
+    rich_dynamic_blend_predictions: list[dict[str, object]] = []
+    shared_sinbpd_baseline_predictions: list[dict[str, object]] = []
+    adaptive_summary: list[dict[str, object]] = []
+    rich_baseline_summary: list[dict[str, object]] = []
+    rich_dynamic_blend_summary: list[dict[str, object]] = []
+    shared_sinbpd_baseline_summary: list[dict[str, object]] = []
+    adaptive_loso_predictions: list[dict[str, object]] = []
+    rich_baseline_loso_predictions: list[dict[str, object]] = []
+    rich_dynamic_blend_loso_predictions: list[dict[str, object]] = []
+    shared_sinbpd_baseline_loso_predictions: list[dict[str, object]] = []
+    adaptive_loso_summary: list[dict[str, object]] = []
+    rich_baseline_loso_summary: list[dict[str, object]] = []
+    rich_dynamic_blend_loso_summary: list[dict[str, object]] = []
+    shared_sinbpd_baseline_loso_summary: list[dict[str, object]] = []
+
+    # Baseline-family experimental branches are intentionally disabled in default runs.
+    # Keep this block for future research with --enable-baseline-experiments.
+    if enable_baseline_experiments:
+        adaptive_models = train_adaptive_models(
             samples_by_method,
-            all_sessions - {held_out},
+            all_sessions,
             baseline_ridge_alpha=args.baseline_ridge_alpha,
             delta_ridge_alpha=args.ridge_alpha,
             baseline_shrinkage=args.baseline_shrinkage,
         )
-        for row in replay_adaptive_model(
-            adaptive_loso_models,
+        rich_baseline_models = train_rich_baseline_models(
             samples_by_method,
-            {held_out},
-            series="smartphone_initial_baseline_loso",
-        ):
-            row = dict(row)
-            row["held_out_session"] = held_out
-            adaptive_loso_predictions.append(row)
-        rich_loso_models = train_rich_baseline_models(
-            samples_by_method,
-            all_sessions - {held_out},
+            all_sessions,
             baseline_ridge_alpha=args.rich_baseline_ridge_alpha,
             delta_ridge_alpha=args.ridge_alpha,
             baseline_shrinkage=args.baseline_shrinkage,
         )
-        for row in replay_adaptive_model(
-            rich_loso_models,
+        shared_sinbpd_baseline_models = train_shared_sinbpd_baseline_models(
             samples_by_method,
-            {held_out},
-            series="smartphone_rich_baseline_loso",
+            all_sessions,
+            baseline_ridge_alpha=args.rich_baseline_ridge_alpha,
+            delta_ridge_alpha=args.ridge_alpha,
+            baseline_shrinkage=args.baseline_shrinkage,
+        )
+        adaptive_predictions = replay_adaptive_model(
+            adaptive_models,
+            samples_by_method,
+            all_sessions,
+            series="smartphone_initial_baseline",
+        )
+        rich_baseline_predictions = replay_adaptive_model(
+            rich_baseline_models,
+            samples_by_method,
+            all_sessions,
+            series="smartphone_rich_baseline",
             rich_summary=True,
-        ):
-            row = dict(row)
-            row["held_out_session"] = held_out
-            rich_baseline_loso_predictions.append(row)
-        for row in replay_baseline_dynamic_blend(
-            rich_loso_models,
-            loso_models,
+        )
+        rich_dynamic_blend_predictions = replay_baseline_dynamic_blend(
+            rich_baseline_models,
+            models,
             samples_by_method,
-            {held_out},
-            series="smartphone_rich_dynamic_blend_loso",
+            all_sessions,
+            series="smartphone_rich_dynamic_blend",
             dynamic_gain_map=args.dynamic_blend_gain_map,
             dynamic_gain_pp=args.dynamic_blend_gain_pp,
             rich_summary=True,
-        ):
-            row = dict(row)
-            row["held_out_session"] = held_out
-            rich_dynamic_blend_loso_predictions.append(row)
-        shared_sinbpd_loso_models = train_shared_sinbpd_baseline_models(
-            samples_by_method,
-            all_sessions - {held_out},
-            baseline_ridge_alpha=args.rich_baseline_ridge_alpha,
-            delta_ridge_alpha=args.ridge_alpha,
-            baseline_shrinkage=args.baseline_shrinkage,
         )
-        for row in replay_adaptive_model(
-            shared_sinbpd_loso_models,
+        shared_sinbpd_baseline_predictions = replay_adaptive_model(
+            shared_sinbpd_baseline_models,
             samples_by_method,
-            {held_out},
-            series="smartphone_shared_sinbpd_baseline_loso",
+            all_sessions,
+            series="smartphone_shared_sinbpd_baseline",
             rich_summary=True,
-        ):
-            row = dict(row)
-            row["held_out_session"] = held_out
-            shared_sinbpd_baseline_loso_predictions.append(row)
-    loso_summary = build_summary(loso_predictions, "leave_one_session_out")
-    adaptive_loso_summary = build_summary(adaptive_loso_predictions, "smartphone_initial_baseline_loso")
-    rich_baseline_loso_summary = build_summary(rich_baseline_loso_predictions, "smartphone_rich_baseline_loso")
-    rich_dynamic_blend_loso_summary = build_summary(
-        rich_dynamic_blend_loso_predictions,
-        "smartphone_rich_dynamic_blend_loso",
-    )
-    shared_sinbpd_baseline_loso_summary = build_summary(
-        shared_sinbpd_baseline_loso_predictions,
-        "smartphone_shared_sinbpd_baseline_loso",
-    )
-    session_style_summary = build_session_style_summary(
-        [
-            ("current_app_smoothed", baseline_predictions),
-            ("refit_map_pp_smoothed", predictions),
-            ("smartphone_initial_baseline", adaptive_predictions),
-            ("smartphone_rich_baseline", rich_baseline_predictions),
-            ("smartphone_rich_dynamic_blend", rich_dynamic_blend_predictions),
-            ("smartphone_shared_sinbpd_baseline", shared_sinbpd_baseline_predictions),
-            ("smartphone_initial_baseline_loso", adaptive_loso_predictions),
-            ("smartphone_rich_baseline_loso", rich_baseline_loso_predictions),
-            ("smartphone_rich_dynamic_blend_loso", rich_dynamic_blend_loso_predictions),
-            ("smartphone_shared_sinbpd_baseline_loso", shared_sinbpd_baseline_loso_predictions),
-            ("leave_one_session_out", loso_predictions),
-        ]
-    )
+        )
+        adaptive_summary = build_summary(adaptive_predictions, "smartphone_initial_baseline")
+        rich_baseline_summary = build_summary(rich_baseline_predictions, "smartphone_rich_baseline")
+        rich_dynamic_blend_summary = build_summary(rich_dynamic_blend_predictions, "smartphone_rich_dynamic_blend")
+        shared_sinbpd_baseline_summary = build_summary(
+            shared_sinbpd_baseline_predictions,
+            "smartphone_shared_sinbpd_baseline",
+        )
+        for held_out in sessions:
+            adaptive_loso_models = train_adaptive_models(
+                samples_by_method,
+                all_sessions - {held_out},
+                baseline_ridge_alpha=args.baseline_ridge_alpha,
+                delta_ridge_alpha=args.ridge_alpha,
+                baseline_shrinkage=args.baseline_shrinkage,
+            )
+            for row in replay_adaptive_model(
+                adaptive_loso_models,
+                samples_by_method,
+                {held_out},
+                series="smartphone_initial_baseline_loso",
+            ):
+                row = dict(row)
+                row["held_out_session"] = held_out
+                adaptive_loso_predictions.append(row)
+            rich_loso_models = train_rich_baseline_models(
+                samples_by_method,
+                all_sessions - {held_out},
+                baseline_ridge_alpha=args.rich_baseline_ridge_alpha,
+                delta_ridge_alpha=args.ridge_alpha,
+                baseline_shrinkage=args.baseline_shrinkage,
+            )
+            for row in replay_adaptive_model(
+                rich_loso_models,
+                samples_by_method,
+                {held_out},
+                series="smartphone_rich_baseline_loso",
+                rich_summary=True,
+            ):
+                row = dict(row)
+                row["held_out_session"] = held_out
+                rich_baseline_loso_predictions.append(row)
+            for row in replay_baseline_dynamic_blend(
+                rich_loso_models,
+                models,
+                samples_by_method,
+                {held_out},
+                series="smartphone_rich_dynamic_blend_loso",
+                dynamic_gain_map=args.dynamic_blend_gain_map,
+                dynamic_gain_pp=args.dynamic_blend_gain_pp,
+                rich_summary=True,
+            ):
+                row = dict(row)
+                row["held_out_session"] = held_out
+                rich_dynamic_blend_loso_predictions.append(row)
+            shared_sinbpd_loso_models = train_shared_sinbpd_baseline_models(
+                samples_by_method,
+                all_sessions - {held_out},
+                baseline_ridge_alpha=args.rich_baseline_ridge_alpha,
+                delta_ridge_alpha=args.ridge_alpha,
+                baseline_shrinkage=args.baseline_shrinkage,
+            )
+            for row in replay_adaptive_model(
+                shared_sinbpd_loso_models,
+                samples_by_method,
+                {held_out},
+                series="smartphone_shared_sinbpd_baseline_loso",
+                rich_summary=True,
+            ):
+                row = dict(row)
+                row["held_out_session"] = held_out
+                shared_sinbpd_baseline_loso_predictions.append(row)
+        adaptive_loso_summary = build_summary(adaptive_loso_predictions, "smartphone_initial_baseline_loso")
+        rich_baseline_loso_summary = build_summary(rich_baseline_loso_predictions, "smartphone_rich_baseline_loso")
+        rich_dynamic_blend_loso_summary = build_summary(
+            rich_dynamic_blend_loso_predictions,
+            "smartphone_rich_dynamic_blend_loso",
+        )
+        shared_sinbpd_baseline_loso_summary = build_summary(
+            shared_sinbpd_baseline_loso_predictions,
+            "smartphone_shared_sinbpd_baseline_loso",
+        )
 
-    payload = coefficients_payload(models, args.sessions_root, args.ridge_alpha)
-    payload["sessions"] = sessions
-    payload["sample_counts"] = {method: len(samples) for method, samples in samples_by_method.items()}
-    payload["experimental_smartphone_initial_baseline"] = adaptive_coefficients_payload(adaptive_models)
-    payload["experimental_smartphone_rich_baseline"] = adaptive_coefficients_payload(rich_baseline_models)
-    payload["experimental_smartphone_rich_dynamic_blend"] = {
-        "note": (
-            "Smartphone-only best-of-both candidate: absolute MAP/PP baseline comes from "
-            "experimental_smartphone_rich_baseline, while short-term dynamics are the "
-            "refit_map_pp_smoothed model delta from the first good beats. CNAP is only used "
-            "offline to fit the fixed baseline and dynamic coefficients."
-        ),
-        "baseline_model": "experimental_smartphone_rich_baseline",
-        "dynamic_model": "models",
-        "dynamic_anchor_beats": INITIAL_BASELINE_BEATS,
-        "dynamic_gain_MAP": args.dynamic_blend_gain_map,
-        "dynamic_gain_PP": args.dynamic_blend_gain_pp,
-    }
-    payload["experimental_smartphone_shared_sinbpd_baseline"] = adaptive_coefficients_payload(
-        shared_sinbpd_baseline_models
-    )
-
-    plot_paths = [
-        *generate_timeseries_plots(
+    session_style_groups: list[tuple[str, list[dict[str, object]]]] = [
+        ("current_app_smoothed", baseline_predictions),
+        ("refit_map_pp_smoothed", predictions),
+        ("leave_one_session_out", loso_predictions),
+    ]
+    if enable_baseline_experiments:
+        session_style_groups.extend(
             [
-                ("current_app_smoothed", baseline_predictions),
-                ("refit_map_pp_smoothed", predictions),
                 ("smartphone_initial_baseline", adaptive_predictions),
                 ("smartphone_rich_baseline", rich_baseline_predictions),
                 ("smartphone_rich_dynamic_blend", rich_dynamic_blend_predictions),
                 ("smartphone_shared_sinbpd_baseline", shared_sinbpd_baseline_predictions),
-            ],
-            plots_dir,
-        ),
+                ("smartphone_initial_baseline_loso", adaptive_loso_predictions),
+                ("smartphone_rich_baseline_loso", rich_baseline_loso_predictions),
+                ("smartphone_rich_dynamic_blend_loso", rich_dynamic_blend_loso_predictions),
+                ("smartphone_shared_sinbpd_baseline_loso", shared_sinbpd_baseline_loso_predictions),
+            ]
+        )
+    session_style_summary = build_session_style_summary(session_style_groups)
+
+    payload = coefficients_payload(models, args.sessions_root, args.ridge_alpha)
+    payload["sessions"] = sessions
+    payload["sample_counts"] = {
+        method: len(samples_by_method.get(method, [])) for method in METHOD_ORDER
+    }
+    if enable_baseline_experiments:
+        payload["experimental_smartphone_initial_baseline"] = adaptive_coefficients_payload(adaptive_models)
+        payload["experimental_smartphone_rich_baseline"] = adaptive_coefficients_payload(rich_baseline_models)
+        payload["experimental_smartphone_rich_dynamic_blend"] = {
+            "note": (
+                "Smartphone-only best-of-both candidate: absolute MAP/PP baseline comes from "
+                "experimental_smartphone_rich_baseline, while short-term dynamics are the "
+                "refit_map_pp_smoothed model delta from the first good beats. CNAP is only used "
+                "offline to fit the fixed baseline and dynamic coefficients."
+            ),
+            "baseline_model": "experimental_smartphone_rich_baseline",
+            "dynamic_model": "models",
+            "dynamic_anchor_beats": INITIAL_BASELINE_BEATS,
+            "dynamic_gain_MAP": args.dynamic_blend_gain_map,
+            "dynamic_gain_PP": args.dynamic_blend_gain_pp,
+        }
+        payload["experimental_smartphone_shared_sinbpd_baseline"] = adaptive_coefficients_payload(
+            shared_sinbpd_baseline_models
+        )
+
+    plot_series: list[tuple[str, list[dict[str, object]]]] = [
+        ("current_app_smoothed", baseline_predictions),
+        ("refit_map_pp_smoothed", predictions),
+    ]
+    if enable_baseline_experiments:
+        plot_series.extend(
+            [
+                ("smartphone_initial_baseline", adaptive_predictions),
+                ("smartphone_rich_baseline", rich_baseline_predictions),
+                ("smartphone_rich_dynamic_blend", rich_dynamic_blend_predictions),
+                ("smartphone_shared_sinbpd_baseline", shared_sinbpd_baseline_predictions),
+            ]
+        )
+    plot_paths = [
+        *generate_timeseries_plots(plot_series, plots_dir),
         *generate_all_scatter_plots(predictions, plots_dir),
     ]
 
@@ -2017,34 +1971,44 @@ def main() -> int:
     write_csv(evaluation_dir / "current_app_evaluation_summary.csv", baseline_summary)
     write_csv(evaluation_dir / "refit_predictions.csv", predictions)
     write_csv(evaluation_dir / "refit_evaluation_summary.csv", summary)
-    write_csv(evaluation_dir / "smartphone_initial_baseline_predictions.csv", adaptive_predictions)
-    write_csv(evaluation_dir / "smartphone_initial_baseline_evaluation_summary.csv", adaptive_summary)
-    write_csv(evaluation_dir / "smartphone_rich_baseline_predictions.csv", rich_baseline_predictions)
-    write_csv(evaluation_dir / "smartphone_rich_baseline_evaluation_summary.csv", rich_baseline_summary)
-    write_csv(evaluation_dir / "smartphone_rich_dynamic_blend_predictions.csv", rich_dynamic_blend_predictions)
-    write_csv(evaluation_dir / "smartphone_rich_dynamic_blend_evaluation_summary.csv", rich_dynamic_blend_summary)
-    write_csv(evaluation_dir / "smartphone_shared_sinbpd_baseline_predictions.csv", shared_sinbpd_baseline_predictions)
-    write_csv(
-        evaluation_dir / "smartphone_shared_sinbpd_baseline_evaluation_summary.csv",
-        shared_sinbpd_baseline_summary,
-    )
-    write_csv(evaluation_dir / "smartphone_initial_baseline_loso_predictions.csv", adaptive_loso_predictions)
-    write_csv(evaluation_dir / "smartphone_initial_baseline_loso_evaluation_summary.csv", adaptive_loso_summary)
-    write_csv(evaluation_dir / "smartphone_rich_baseline_loso_predictions.csv", rich_baseline_loso_predictions)
-    write_csv(evaluation_dir / "smartphone_rich_baseline_loso_evaluation_summary.csv", rich_baseline_loso_summary)
-    write_csv(evaluation_dir / "smartphone_rich_dynamic_blend_loso_predictions.csv", rich_dynamic_blend_loso_predictions)
-    write_csv(
-        evaluation_dir / "smartphone_rich_dynamic_blend_loso_evaluation_summary.csv",
-        rich_dynamic_blend_loso_summary,
-    )
-    write_csv(
-        evaluation_dir / "smartphone_shared_sinbpd_baseline_loso_predictions.csv",
-        shared_sinbpd_baseline_loso_predictions,
-    )
-    write_csv(
-        evaluation_dir / "smartphone_shared_sinbpd_baseline_loso_evaluation_summary.csv",
-        shared_sinbpd_baseline_loso_summary,
-    )
+    if enable_baseline_experiments:
+        write_csv(evaluation_dir / "smartphone_initial_baseline_predictions.csv", adaptive_predictions)
+        write_csv(evaluation_dir / "smartphone_initial_baseline_evaluation_summary.csv", adaptive_summary)
+        write_csv(evaluation_dir / "smartphone_rich_baseline_predictions.csv", rich_baseline_predictions)
+        write_csv(evaluation_dir / "smartphone_rich_baseline_evaluation_summary.csv", rich_baseline_summary)
+        write_csv(evaluation_dir / "smartphone_rich_dynamic_blend_predictions.csv", rich_dynamic_blend_predictions)
+        write_csv(
+            evaluation_dir / "smartphone_rich_dynamic_blend_evaluation_summary.csv",
+            rich_dynamic_blend_summary,
+        )
+        write_csv(
+            evaluation_dir / "smartphone_shared_sinbpd_baseline_predictions.csv",
+            shared_sinbpd_baseline_predictions,
+        )
+        write_csv(
+            evaluation_dir / "smartphone_shared_sinbpd_baseline_evaluation_summary.csv",
+            shared_sinbpd_baseline_summary,
+        )
+        write_csv(evaluation_dir / "smartphone_initial_baseline_loso_predictions.csv", adaptive_loso_predictions)
+        write_csv(evaluation_dir / "smartphone_initial_baseline_loso_evaluation_summary.csv", adaptive_loso_summary)
+        write_csv(evaluation_dir / "smartphone_rich_baseline_loso_predictions.csv", rich_baseline_loso_predictions)
+        write_csv(evaluation_dir / "smartphone_rich_baseline_loso_evaluation_summary.csv", rich_baseline_loso_summary)
+        write_csv(
+            evaluation_dir / "smartphone_rich_dynamic_blend_loso_predictions.csv",
+            rich_dynamic_blend_loso_predictions,
+        )
+        write_csv(
+            evaluation_dir / "smartphone_rich_dynamic_blend_loso_evaluation_summary.csv",
+            rich_dynamic_blend_loso_summary,
+        )
+        write_csv(
+            evaluation_dir / "smartphone_shared_sinbpd_baseline_loso_predictions.csv",
+            shared_sinbpd_baseline_loso_predictions,
+        )
+        write_csv(
+            evaluation_dir / "smartphone_shared_sinbpd_baseline_loso_evaluation_summary.csv",
+            shared_sinbpd_baseline_loso_summary,
+        )
     write_csv(evaluation_dir / "loso_predictions.csv", loso_predictions)
     write_csv(evaluation_dir / "loso_evaluation_summary.csv", loso_summary)
     write_csv(evaluation_dir / "session_evaluation_summary.csv", session_style_summary)
@@ -2056,32 +2020,32 @@ def main() -> int:
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    (evaluation_dir / "coefficient_report.md").write_text(
-        "\n".join(
+    report_lines = [
+        "# Realtime Coefficient Report",
+        "",
+        f"- sessions_root: {args.sessions_root}",
+        f"- ridge_alpha: {args.ridge_alpha}",
+        f"- baseline_ridge_alpha: {args.baseline_ridge_alpha}",
+        f"- rich_baseline_ridge_alpha: {args.rich_baseline_ridge_alpha}",
+        f"- baseline_shrinkage: {args.baseline_shrinkage}",
+        f"- dynamic_blend_gain_map: {args.dynamic_blend_gain_map}",
+        f"- dynamic_blend_gain_pp: {args.dynamic_blend_gain_pp}",
+        f"- initial_baseline_beats: {INITIAL_BASELINE_BEATS}",
+        f"- filters: {EVALUATION_FILTERS}",
+        "- CNAP usage: offline training/evaluation labels only; not used by the runtime app.",
+        "",
+        "## Outputs",
+        "",
+        "- session_evaluation_summary.csv",
+        "- session_evaluation_summary.json",
+        "- current_app_evaluation_summary.csv",
+        "- refit_evaluation_summary.csv",
+        "- loso_evaluation_summary.csv",
+        "- fixed_coefficients.json",
+    ]
+    if enable_baseline_experiments:
+        report_lines.extend(
             [
-                "# Realtime Coefficient Report",
-                "",
-                f"- sessions_root: {args.sessions_root}",
-                f"- ridge_alpha: {args.ridge_alpha}",
-                f"- baseline_ridge_alpha: {args.baseline_ridge_alpha}",
-                f"- rich_baseline_ridge_alpha: {args.rich_baseline_ridge_alpha}",
-                f"- baseline_shrinkage: {args.baseline_shrinkage}",
-                f"- dynamic_blend_gain_map: {args.dynamic_blend_gain_map}",
-                f"- dynamic_blend_gain_pp: {args.dynamic_blend_gain_pp}",
-                f"- initial_baseline_beats: {INITIAL_BASELINE_BEATS}",
-                f"- filters: {EVALUATION_FILTERS}",
-                "- CNAP usage: offline training/evaluation labels only; not used by the runtime app.",
-                "- smartphone_initial_baseline: experimental smartphone-only baseline adaptation from initial beat features; validate LOSO before shipping.",
-                "- smartphone_rich_baseline: richer smartphone-only baseline adaptation using initial raw/smoothed estimates, coefficient terms, beat stats, and method-specific morphology features; validate LOSO before shipping.",
-                "- smartphone_rich_dynamic_blend: rich baseline anchor plus refit MAP/PP deltas from the initial dynamic anchor; intended to keep per-subject baseline while restoring real-time up/down movement.",
-                "- smartphone_shared_sinbpd_baseline: shared baseline from SinBP_D rich features, with method-specific deltas; this is the most physiologically explainable smartphone-only baseline candidate.",
-                "",
-                "## Outputs",
-                "",
-                "- session_evaluation_summary.csv",
-                "- session_evaluation_summary.json",
-                "- current_app_evaluation_summary.csv",
-                "- refit_evaluation_summary.csv",
                 "- smartphone_initial_baseline_evaluation_summary.csv",
                 "- smartphone_rich_baseline_evaluation_summary.csv",
                 "- smartphone_rich_dynamic_blend_evaluation_summary.csv",
@@ -2090,17 +2054,18 @@ def main() -> int:
                 "- smartphone_rich_baseline_loso_evaluation_summary.csv",
                 "- smartphone_rich_dynamic_blend_loso_evaluation_summary.csv",
                 "- smartphone_shared_sinbpd_baseline_loso_evaluation_summary.csv",
-                "- loso_evaluation_summary.csv",
-                "- fixed_coefficients.json",
-                "",
-                "## Plots",
-                "",
-                *[f"- plots/{path.name}" for path in plot_paths],
-                "",
             ]
-        ),
-        encoding="utf-8",
+        )
+    report_lines.extend(
+        [
+            "",
+            "## Plots",
+            "",
+            *[f"- plots/{path.name}" for path in plot_paths],
+            "",
+        ]
     )
+    (evaluation_dir / "coefficient_report.md").write_text("\n".join(report_lines), encoding="utf-8")
 
     for row in session_style_summary:
         if row["session"] == "ALL" and row["target"] == "SBP":

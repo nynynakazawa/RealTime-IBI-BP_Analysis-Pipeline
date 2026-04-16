@@ -29,9 +29,18 @@ from realtime_pipeline.evaluate_session import (
     generate_session_plots,
     write_session_report,
 )
-from realtime_pipeline.experimental_repair import repair_session_experimental_outputs
 from realtime_pipeline.merge_session import merge_session_data
 import pandas as pd
+
+
+LEGACY_EXPERIMENTAL_FILES = (
+    "session_evaluation_summary_experimental.csv",
+    "session_evaluation_summary_experimental.json",
+    "session_evaluation_summary_experimental_app_export_backup.csv",
+    "session_evaluation_summary_experimental_app_export_backup.json",
+    "session_evaluation_summary_experimental_meta.json",
+    "session_evaluation_predictions_experimental_repaired.csv",
+)
 
 
 def kill_stale_session_processes(current_pid: int) -> None:
@@ -83,16 +92,32 @@ def kill_stale_session_processes(current_pid: int) -> None:
             continue
 
 
+def cleanup_legacy_experimental_outputs(evaluation_dir: Path) -> list[Path]:
+    removed: list[Path] = []
+    for name in LEGACY_EXPERIMENTAL_FILES:
+        path = evaluation_dir / name
+        if not path.exists():
+            continue
+        try:
+            path.unlink()
+            removed.append(path)
+        except OSError:
+            continue
+    return removed
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CNAP + smartphone realtime pipeline")
+    parser = argparse.ArgumentParser(
+        description="CNAP + smartphone realtime pipeline (active methods: RTBP / SinBP_D / SinBP_M)"
+    )
     parser.add_argument("--subject-id", default="")
     parser.add_argument("--session-number", type=int, default=1)
     parser.add_argument("--mode", type=int, default=1)
     parser.add_argument("--session-id", default="")
     parser.add_argument("--recover-session-id", default="")
-    parser.add_argument("--repair-existing-experimental", action="store_true")
-    parser.add_argument("--repair-target-session", default="")
+    # Baseline-family experimental repair flow is intentionally disabled in normal runs.
     parser.add_argument("--rerun-existing-evaluations", action="store_true")
+    parser.add_argument("--target-session", default="")
     return parser
 
 
@@ -111,11 +136,17 @@ def render_event(event: AndroidBeatEvent) -> str:
     rtbp = event.rtbp
     sin_d = event.sinbp_d
     sin_m = event.sinbp_m
+    rtbp_sbp = rtbp.get("sbp_process", rtbp.get("sbp", 0))
+    rtbp_dbp = rtbp.get("dbp_process", rtbp.get("dbp", 0))
+    sin_d_sbp = sin_d.get("sbp_process", sin_d.get("sbp", 0))
+    sin_d_dbp = sin_d.get("dbp_process", sin_d.get("dbp", 0))
+    sin_m_sbp = sin_m.get("sbp_process", sin_m.get("sbp", 0))
+    sin_m_dbp = sin_m.get("dbp_process", sin_m.get("dbp", 0))
     return (
         f"[phone] t={event.elapsed_time_s:6.2f}s beat={event.beat_index:03d} "
-        f"RTBP={rtbp.get('sbp', 0):6.1f}/{rtbp.get('dbp', 0):5.1f} "
-        f"SinD={sin_d.get('sbp', 0):6.1f}/{sin_d.get('dbp', 0):5.1f} "
-        f"SinM={sin_m.get('sbp', 0):6.1f}/{sin_m.get('dbp', 0):5.1f}"
+        f"RTBP={rtbp_sbp:6.1f}/{rtbp_dbp:5.1f} "
+        f"SinD={sin_d_sbp:6.1f}/{sin_d_dbp:5.1f} "
+        f"SinM={sin_m_sbp:6.1f}/{sin_m_dbp:5.1f}"
     )
 
 
@@ -133,6 +164,12 @@ def render_combined_event(phone: AndroidBeatEvent, cnap: CNAPBeatEvent | None) -
     rtbp = phone.rtbp
     sin_d = phone.sinbp_d
     sin_m = phone.sinbp_m
+    rtbp_sbp = rtbp.get("sbp_process", rtbp.get("sbp", 0))
+    rtbp_dbp = rtbp.get("dbp_process", rtbp.get("dbp", 0))
+    sin_d_sbp = sin_d.get("sbp_process", sin_d.get("sbp", 0))
+    sin_d_dbp = sin_d.get("dbp_process", sin_d.get("dbp", 0))
+    sin_m_sbp = sin_m.get("sbp_process", sin_m.get("sbp", 0))
+    sin_m_dbp = sin_m.get("dbp_process", sin_m.get("dbp", 0))
     dt_s = (
         (phone.timestamp_ms - float(cnap.timestamp_ms)) / 1000.0
         if cnap.timestamp_ms is not None and phone.timestamp_ms > 0
@@ -141,9 +178,9 @@ def render_combined_event(phone: AndroidBeatEvent, cnap: CNAPBeatEvent | None) -
     return (
         f"[sync ] t_phone={phone.elapsed_time_s:6.2f}s beat={phone.beat_index:03d} "
         f"CNAP={cnap.systolic:6.1f}/{cnap.diastolic:5.1f} "
-        f"RTBP={rtbp.get('sbp', 0):6.1f}/{rtbp.get('dbp', 0):5.1f} "
-        f"SinD={sin_d.get('sbp', 0):6.1f}/{sin_d.get('dbp', 0):5.1f} "
-        f"SinM={sin_m.get('sbp', 0):6.1f}/{sin_m.get('dbp', 0):5.1f} "
+        f"RTBP={rtbp_sbp:6.1f}/{rtbp_dbp:5.1f} "
+        f"SinD={sin_d_sbp:6.1f}/{sin_d_dbp:5.1f} "
+        f"SinM={sin_m_sbp:6.1f}/{sin_m_dbp:5.1f} "
         f"dt={dt_s:+5.2f}s"
     )
 
@@ -165,24 +202,10 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = REPO_ROOT
     sessions_root = REALTIME_SESSIONS_ROOT
 
-    if args.repair_existing_experimental:
-        target_sessions = {args.repair_target_session.strip()} if args.repair_target_session.strip() else None
-        artifacts = repair_session_experimental_outputs(sessions_root, target_sessions=target_sessions)
-        if not artifacts:
-            print("no sessions were repaired")
-            return 1
-        print(f"repaired experimental summaries: {len(artifacts)}")
-        for artifact in artifacts:
-            print(f"experimental summary -> {artifact.summary_csv}")
-            print(f"experimental json -> {artifact.summary_json}")
-            print(f"experimental predictions -> {artifact.predictions_csv}")
-        return 0
-
     if args.rerun_existing_evaluations:
-        target_session = args.repair_target_session.strip()
+        target_session = args.target_session.strip()
         session_dirs = sorted(path for path in sessions_root.iterdir() if path.is_dir())
         rerun_count = 0
-        repaired_count = 0
         for session_dir in session_dirs:
             session_id = session_dir.name
             if target_session and session_id != target_session:
@@ -196,9 +219,8 @@ def main(argv: list[str] | None = None) -> int:
             summary_df = pd.read_csv(summary_csv)
             plot_paths = generate_session_plots(merged_df, eval_dir)
             report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
-            repaired = repair_session_experimental_outputs(sessions_root, target_sessions={session_id})
+            cleanup_legacy_experimental_outputs(eval_dir)
             rerun_count += 1
-            repaired_count += len(repaired)
             print(f"reran -> {session_id}")
             print(f"evaluation summary -> {summary_csv}")
             print(f"evaluation json -> {summary_json}")
@@ -207,7 +229,6 @@ def main(argv: list[str] | None = None) -> int:
             print("no existing sessions were rerun")
             return 1
         print(f"reran evaluations: {rerun_count}")
-        print(f"experimental repairs: {repaired_count}")
         return 0
 
     phone_ok, phone_status = phone_is_ready()
@@ -253,18 +274,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         merged_df = merge_session_data(training_csv, cnap_beats_csv, merged_csv)
         summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
-        repaired = repair_session_experimental_outputs(sessions_root, target_sessions={session_id})
         summary_df = pd.read_csv(summary_csv)
         plot_paths = generate_session_plots(merged_df, eval_dir)
         report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
+        removed_legacy = cleanup_legacy_experimental_outputs(eval_dir)
         print(f"recovered smartphone files -> {smartphone_dir}")
         print(f"cnap beats -> {cnap_beats_csv}")
         print(f"merged csv -> {merged_csv}")
         print(f"evaluation summary -> {summary_csv}")
         print(f"evaluation json -> {summary_json}")
-        for artifact in repaired:
-            print(f"experimental summary -> {artifact.summary_csv}")
-            print(f"experimental predictions -> {artifact.predictions_csv}")
+        if removed_legacy:
+            print(f"removed legacy experimental files: {len(removed_legacy)}")
         print(f"session report -> {report_path}")
         return 0
 
@@ -339,19 +359,18 @@ def main(argv: list[str] | None = None) -> int:
 
     merged_df = merge_session_data(training_csv, cnap_beats_csv, merged_csv)
     summary_csv, summary_json = evaluate_merged_session(merged_df, eval_dir)
-    repaired = repair_session_experimental_outputs(sessions_root, target_sessions={session_id})
     summary_df = pd.read_csv(summary_csv)
     plot_paths = generate_session_plots(merged_df, eval_dir)
     report_path = write_session_report(merged_df, summary_df, eval_dir, plot_paths)
+    removed_legacy = cleanup_legacy_experimental_outputs(eval_dir)
 
     print(f"pulled smartphone files -> {smartphone_dir}")
     print(f"cnap beats -> {cnap_beats_csv}")
     print(f"merged csv -> {merged_csv}")
     print(f"evaluation summary -> {summary_csv}")
     print(f"evaluation json -> {summary_json}")
-    for artifact in repaired:
-        print(f"experimental summary -> {artifact.summary_csv}")
-        print(f"experimental predictions -> {artifact.predictions_csv}")
+    if removed_legacy:
+        print(f"removed legacy experimental files: {len(removed_legacy)}")
     print(f"session report -> {report_path}")
     return 0
 

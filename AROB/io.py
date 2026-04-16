@@ -3,6 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+from realtime_pipeline.session_filtered_input import (
+    ensure_session_input_filtered,
+    session_input_filtered_path as shared_session_input_filtered_path,
+)
 
 from .config import (
     ARTIFACT_COL,
@@ -23,7 +27,7 @@ def list_session_dirs(root: Path = REALTIME_SESSIONS_ROOT) -> list[Path]:
 
 
 def session_input_filtered_path(session_dir: Path) -> Path:
-    return session_dir / "evaluation" / "session_evaluation_input_filtered.csv"
+    return shared_session_input_filtered_path(session_dir)
 
 
 def load_session_input_filtered(session_dir: Path) -> pd.DataFrame:
@@ -58,7 +62,7 @@ def load_session_input_filtered(session_dir: Path) -> pd.DataFrame:
             usecols.add(spec.output_valid_col)
         if spec.reject_reason_col:
             usecols.add(spec.reject_reason_col)
-    path = session_input_filtered_path(session_dir)
+    path = ensure_session_input_filtered(session_dir)
     available = pd.read_csv(path, nrows=0).columns.tolist()
     selected = sorted(usecols.intersection(set(available)))
     df = pd.read_csv(path, usecols=selected)

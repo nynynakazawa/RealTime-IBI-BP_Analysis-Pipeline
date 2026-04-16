@@ -33,13 +33,14 @@ TRACKING_BLEND_BY_METHOD_TARGET: dict[str, dict[str, float]] = {
     # SinBP_M often under-reacts in centered dynamics; use slightly stronger
     # projection blending while keeping RTBP at default blend levels.
     "SinBP_M": {
-        "MAP": 1.00,
-        "PP": 1.00,
+        "MAP": 1.10,
+        "PP": 1.10,
     },
-    # Weak projection stabilizes PPShapeC without collapsing waveform dynamics.
-    "SinBP_D_PPShapeC": {
-        "MAP": 0.22,
-        "PP": 0.22,
+    # Small projection improves SinBP_D centered tracking without changing its
+    # core feature definition.
+    "SinBP_D": {
+        "MAP": 0.20,
+        "PP": 0.20,
     }
 }
 METHOD_FIXED_WINDOW_LAG: dict[str, int] = {
@@ -51,29 +52,23 @@ METHOD_LAG_BLEND: dict[str, float] = {
     "SinBP_M": 0.85,
     # SinBP_D benefits from full lag application under positive-sign constraint.
     "SinBP_D": 1.00,
-    # Keep PPShapeC at full lag application.
-    "SinBP_D_PPShapeC": 1.00,
 }
 SESSION_ALIGNMENT_CALIB_WINDOWS_DEFAULT = 8
 SESSION_ALIGNMENT_CALIB_WINDOWS_BY_METHOD: dict[str, int] = {
     "RTBP": 10,
-    # Longer calibration for SinBP_D/PPShapeC stabilizes lag/sign estimation.
+    # Longer calibration for SinBP_D stabilizes lag/sign estimation.
     "SinBP_D": 8,
-    "SinBP_D_PPShapeC": 8,
     "SinBP_M": 8,
 }
 SESSION_ALIGNMENT_LAG_CANDIDATES: tuple[int, ...] = (-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6)
 SESSION_ALIGNMENT_LAG_CANDIDATES_BY_METHOD: dict[str, tuple[int, ...]] = {
-    # For PPShapeC, restricting lag search avoids overfitting to extreme shifts.
-    "SinBP_D_PPShapeC": (-4, -3, -2, -1, 0, 1, 2, 3, 4),
-    # SinBP_M tracks best with short lag search centered around zero.
-    "SinBP_M": (-2, -1, 0, 1, 2),
+    # SinBP_M benefits from a slightly wider lag search for pooled tracking.
+    "SinBP_M": (-3, -2, -1, 0, 1, 2, 3),
 }
 SESSION_ALIGNMENT_SIGNS: tuple[float, ...] = (1.0, -1.0)
 SESSION_ALIGNMENT_SIGNS_BY_METHOD: dict[str, tuple[float, ...]] = {
     # For SinBP_D, sign flip often collapses PP directionality.
     "SinBP_D": (1.0,),
-    "SinBP_D_PPShapeC": (1.0,),
 }
 SESSION_ALIGNMENT_GAIN_CANDIDATES: tuple[float, ...] = (0.7, 0.85, 1.0, 1.15, 1.3)
 SESSION_ALIGNMENT_GAIN_CANDIDATES_BY_METHOD: dict[str, tuple[float, ...]] = {
@@ -439,7 +434,13 @@ def _select_representative_session(centered_df: pd.DataFrame) -> str | None:
     )
 
 
-def run_tracking_analysis(output_root: Path = OUTPUT_ROOT, make_plots: bool = True) -> PipelineOutputs:
+def run_tracking_analysis(
+    output_root: Path = OUTPUT_ROOT,
+    make_plots: bool = True,
+    *,
+    enable_tracking_projection: bool = False,
+    enable_window_lag_alignment: bool = False,
+) -> PipelineOutputs:
     session_dirs = list_session_dirs()
     base_frames: dict[str, pd.DataFrame] = {}
     for session_dir in session_dirs:
@@ -460,7 +461,8 @@ def run_tracking_analysis(output_root: Path = OUTPUT_ROOT, make_plots: bool = Tr
         raise RuntimeError("no realtime sessions could be loaded for AROB tracking analysis")
 
     long_df = pd.concat(rows, ignore_index=True)
-    long_df = _apply_tracking_projection(long_df)
+    if enable_tracking_projection:
+        long_df = _apply_tracking_projection(long_df)
 
     output_dir = output_root / f"tracking_eval_{_timestamp()}"
     plots_dir = output_dir / "plots"
@@ -471,7 +473,8 @@ def run_tracking_analysis(output_root: Path = OUTPUT_ROOT, make_plots: bool = Tr
     centered_frames: list[pd.DataFrame] = []
     for window_seconds in WINDOW_SECONDS:
         windowed = aggregate_non_overlapping_windows(long_df, window_seconds)
-        windowed = _apply_window_lag_alignment(windowed)
+        if enable_window_lag_alignment:
+            windowed = _apply_window_lag_alignment(windowed)
         metrics_df, centered_df = compute_centered_metrics(windowed)
         per_window_frames.append(windowed)
         per_metric_frames.append(metrics_df)
@@ -538,6 +541,8 @@ def run_tracking_analysis(output_root: Path = OUTPUT_ROOT, make_plots: bool = Tr
         "session_ids": [path.name for path in session_dirs],
         "representative_session": representative_session,
         "plots_generated": bool(make_plots),
+        "tracking_projection_enabled": bool(enable_tracking_projection),
+        "window_lag_alignment_enabled": bool(enable_window_lag_alignment),
         "paper_methods": list(PAPER_METHOD_NAMES),
         "full_summary_csv": str(summary_all_path),
         "pp_component_summary": str(pp_summary_path),

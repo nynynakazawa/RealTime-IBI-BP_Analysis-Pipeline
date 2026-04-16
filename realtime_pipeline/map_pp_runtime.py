@@ -33,6 +33,9 @@ DEFAULT_PP_TERM_SCALES = {
     "SinBP_D_E2": {"HR": 1.0, "E": 0.65, "E2": 0.65},
     "SinBP_D_LocalA": {"HR": 1.0, "E": 0.65, "Stiffness": 1.0},
 }
+CORE_APP_PREFIXES = ("M1_", "M2_", "M3_")
+DEFAULT_PRESERVE_EXISTING_CORE_COLUMNS = True
+DEFAULT_ENABLE_TRACKING_BLEND_OVERRIDES = False
 
 TRACKING_BLEND_SERIES_KEY = "experimental_smartphone_rich_dynamic_blend"
 TRACKING_BLEND_METHOD_SPECS = (
@@ -53,6 +56,10 @@ _LABEL_TO_INDEX = {
     "SinBP_D_E2": {label: index for index, label in enumerate(SINBPD_E2_TERM_LABELS)},
     "SinBP_D_LocalA": {label: index for index, label in enumerate(SINBPD_LOCALA_TERM_LABELS)},
 }
+
+
+def _is_core_app_column(column: str) -> bool:
+    return column.startswith(CORE_APP_PREFIXES)
 
 
 def load_runtime_coefficients(path: Path | None = None) -> dict[str, object]:
@@ -248,9 +255,20 @@ def _tracking_blend_overrides(df: pd.DataFrame, runtime_coefficients: dict[str, 
         dynamic_gain_map = 0.25
     if not math.isfinite(dynamic_gain_pp):
         dynamic_gain_pp = 0.25
+    dynamic_gain_map_by_method = blend_spec.get("dynamic_gain_MAP_by_method")
+    dynamic_gain_pp_by_method = blend_spec.get("dynamic_gain_PP_by_method")
+
+    def _resolve_method_gain(global_gain: float, by_method: object, method_name: str) -> float:
+        if isinstance(by_method, dict):
+            method_gain = _to_float(by_method.get(method_name))
+            if math.isfinite(method_gain):
+                return method_gain
+        return global_gain
 
     overrides: dict[str, list[float]] = {}
     for method_name, prefix, valid_col, reject_col, labels in TRACKING_BLEND_METHOD_SPECS:
+        method_dynamic_gain_map = _resolve_method_gain(dynamic_gain_map, dynamic_gain_map_by_method, method_name)
+        method_dynamic_gain_pp = _resolve_method_gain(dynamic_gain_pp, dynamic_gain_pp_by_method, method_name)
         baseline_model = baseline_models.get(method_name)
         if not isinstance(baseline_model, dict):
             continue
@@ -380,12 +398,12 @@ def _tracking_blend_overrides(df: pd.DataFrame, runtime_coefficients: dict[str, 
                 dynamic_raw_map_pp,
                 dynamic_smoothed_map_pp,
             ):
-                map_smoothed_blended = rich_map + dynamic_gain_map * (map_dynamic - dynamic_anchor_map)
-                pp_smoothed_blended = rich_pp + dynamic_gain_pp * (pp_dynamic - dynamic_anchor_pp)
+                map_smoothed_blended = rich_map + method_dynamic_gain_map * (map_dynamic - dynamic_anchor_map)
+                pp_smoothed_blended = rich_pp + method_dynamic_gain_pp * (pp_dynamic - dynamic_anchor_pp)
                 dbp_smoothed = map_smoothed_blended - pp_smoothed_blended / 3.0
                 sbp_smoothed = dbp_smoothed + pp_smoothed_blended
-                map_raw_blended = rich_map_raw + dynamic_gain_map * (map_raw - dynamic_raw_anchor_map)
-                pp_raw_blended = rich_pp_raw + dynamic_gain_pp * (pp_raw - dynamic_raw_anchor_pp)
+                map_raw_blended = rich_map_raw + method_dynamic_gain_map * (map_raw - dynamic_raw_anchor_map)
+                pp_raw_blended = rich_pp_raw + method_dynamic_gain_pp * (pp_raw - dynamic_raw_anchor_pp)
                 dbp_raw = map_raw_blended - pp_raw_blended / 3.0
                 sbp_raw = dbp_raw + pp_raw_blended
                 position = index_positions[sample["index"]]
@@ -585,6 +603,8 @@ def _predict_method(prefix: str, row: pd.Series, coefficients: dict[str, object]
 def append_runtime_map_pp_columns(
     df: pd.DataFrame,
     coefficients: dict[str, object] | None = None,
+    preserve_existing_core_columns: bool = DEFAULT_PRESERVE_EXISTING_CORE_COLUMNS,
+    enable_tracking_blend_overrides: bool = DEFAULT_ENABLE_TRACKING_BLEND_OVERRIDES,
 ) -> pd.DataFrame:
     runtime_coefficients = coefficients or load_runtime_coefficients()
     enriched = df.copy()
@@ -650,8 +670,9 @@ def append_runtime_map_pp_columns(
             columns[f"{prefix}_PP_model_raw"].append(pp_model_raw)
             columns[f"{prefix}_SBP"].append(sbp_clamped)
             columns[f"{prefix}_DBP"].append(dbp_clamped)
-            columns[f"{prefix}_SBP_raw"].append(sbp_model_raw)
-            columns[f"{prefix}_DBP_raw"].append(dbp_model_raw)
+            # For consistency with app/runtime exports, *_raw columns are clamp-applied values.
+            columns[f"{prefix}_SBP_raw"].append(sbp_clamped)
+            columns[f"{prefix}_DBP_raw"].append(dbp_clamped)
 
             sbp_terms, dbp_terms = map_pp_to_sbp_dbp_terms(prediction["map_terms"], prediction["pp_terms"])
             sbp_coefficients, dbp_coefficients = map_pp_to_sbp_dbp_terms(
@@ -676,12 +697,20 @@ def append_runtime_map_pp_columns(
                 columns["M2_SBP_correction"].append(sbp_model_raw - base_sbp)
                 columns["M2_DBP_correction"].append(dbp_model_raw - base_dbp)
         all_columns.update(columns)
-    tracking_overrides = _tracking_blend_overrides(enriched, runtime_coefficients)
-    if tracking_overrides:
-        all_columns.update(tracking_overrides)
+    if enable_tracking_blend_overrides:
+        tracking_overrides = _tracking_blend_overrides(enriched, runtime_coefficients)
+        if tracking_overrides:
+            all_columns.update(tracking_overrides)
     if not all_columns:
         return enriched
-    existing = [column for column in all_columns if column in enriched.columns]
-    if existing:
-        enriched = enriched.drop(columns=existing)
-    return pd.concat([enriched, pd.DataFrame(all_columns, index=enriched.index)], axis=1)
+    columns_to_apply: dict[str, list[float | str]] = {}
+    for column, values in all_columns.items():
+        if preserve_existing_core_columns and column in enriched.columns and _is_core_app_column(column):
+            continue
+        columns_to_apply[column] = values
+    if not columns_to_apply:
+        return enriched
+    overwrite = [column for column in columns_to_apply if column in enriched.columns]
+    if overwrite:
+        enriched = enriched.drop(columns=overwrite)
+    return pd.concat([enriched, pd.DataFrame(columns_to_apply, index=enriched.index)], axis=1)

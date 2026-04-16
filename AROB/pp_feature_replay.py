@@ -37,7 +37,6 @@ ENGINEERED_FEATURES = (
 CANDIDATE_METHODS = (
     ("SinBP_D_PPShapeA", "sinBP(D-PP-A)", "M2PPA"),
     ("SinBP_D_PPShapeB", "sinBP(D-PP-B)", "M2PPB"),
-    ("SinBP_D_PPShapeC", "sinBP(D-PP-C)", "M2PPC"),
 )
 
 
@@ -327,35 +326,6 @@ def add_pp_replay_candidates(session_frames: dict[str, pd.DataFrame]) -> PpRepla
                     {
                         "held_out_session": held_out_session,
                         "method": "SinBP_D_PPShapeB",
-                        "feature": feature_name,
-                        "coefficient": float(coefficient),
-                    }
-                )
-
-        candidate_c_features = (
-            "M2_ppf_up_down_width_ratio",
-            "M2_ppf_asymmetry_gap",
-        )
-        train_c = _valid_feature_frame(train_df, candidate_c_features)
-        test_c = _valid_feature_frame(test_df, candidate_c_features)
-        if not train_c.empty and not test_c.empty:
-            pred_c, coef_c = _predict_candidate(train_c, test_c, candidate_c_features, correction_blend=1.0)
-            target_df = session_prediction_frames[held_out_session]
-            target_df.loc[pred_c.index, "M2PPC_PP_calibrated"] = pred_c
-            target_df.loc[pred_c.index, "M2PPC_MAP_calibrated"] = target_df.loc[pred_c.index, "M2_MAP_calibrated"]
-            target_df.loc[pred_c.index, "M2PPC_DBP_calibrated"] = (
-                target_df.loc[pred_c.index, "M2PPC_MAP_calibrated"] - target_df.loc[pred_c.index, "M2PPC_PP_calibrated"] / 3.0
-            )
-            target_df.loc[pred_c.index, "M2PPC_SBP_calibrated"] = (
-                target_df.loc[pred_c.index, "M2PPC_DBP_calibrated"] + target_df.loc[pred_c.index, "M2PPC_PP_calibrated"]
-            )
-            target_df.loc[pred_c.index, "M2PPC_output_valid"] = 1
-            target_df.loc[pred_c.index, "M2PPC_reject_reason"] = "ok"
-            for feature_name, coefficient in zip(("intercept", *candidate_c_features), coef_c):
-                model_rows.append(
-                    {
-                        "held_out_session": held_out_session,
-                        "method": "SinBP_D_PPShapeC",
                         "feature": feature_name,
                         "coefficient": float(coefficient),
                     }

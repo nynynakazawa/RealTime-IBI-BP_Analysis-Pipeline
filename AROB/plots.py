@@ -26,7 +26,6 @@ def _method_colors() -> dict[str, str]:
         "RTBP": "#1f77b4",
         "SinBP_M": "#2ca02c",
         "SinBP_D": "#d62728",
-        "SinBP_D_PPShapeC": "#17becf",
     }
 
 
