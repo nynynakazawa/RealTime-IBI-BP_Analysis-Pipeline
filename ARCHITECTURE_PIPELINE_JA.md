@@ -55,10 +55,11 @@ flowchart TD
   - `evaluate_session.py` で session単位評価
 - 重要:
   - `merge_session.py` 内で `ensure_postprocessed_columns()` が呼ばれる
-  - `map_pp_runtime.append_runtime_map_pp_columns()` は呼ばれるが、現在は
-    - `preserve_existing_core_columns=True`
+  - `map_pp_runtime.append_runtime_map_pp_columns()` は現在
+    - `preserve_existing_core_columns=False`
     - `enable_tracking_blend_overrides=False`
-    を固定指定しており、`M1/M2/M3` の既存列（App由来）をデフォルトで上書きしない
+    で実行し、評価時は固定係数から `M1/M2/M3` を再計算して使う
+  - 既存のApp出力列は監査用に `*_app_export` へ退避して残す
 
 ## 3.3 realtime coefficient
 
@@ -114,9 +115,9 @@ flowchart TD
 ## 4.3 二重処理の有無
 
 - コア3手法については、現在デフォルトで
-  - App側後段処理（MAP/PP EWMA）はそのまま保持
-  - Analysis側での `M1/M2/M3` 上書きは抑止
-- したがって、realtime session / coefficient の `current` は App 出力を基準に評価される
+  - App側出力は `*_app_export` として保持
+  - Analysis側評価は固定係数による再計算列（`M1/M2/M3`）を基準に使う
+- したがって、realtime session / coefficient の評価は「その時点の固定係数」を反映する
 - AROBの追加処理はフラグON時のみ有効
 
 ---
@@ -124,8 +125,8 @@ flowchart TD
 ## 5. 変更後の運用ルール
 
 - realtime session / coefficient:
-  - コア3手法は App 由来列を優先
-  - `map_pp_runtime` は不足列補完のみを担当（既存コア列は保持）
+  - コア3手法は固定係数から再計算した列を評価に使う
+  - App実測列は `*_app_export` として保持し、監査時に参照する
 - AROB:
   - デフォルトは補正なし（公平比較）
   - 追加補正を使う場合は CLI フラグを明示し、結果を別runとして保存
@@ -136,6 +137,7 @@ flowchart TD
 
 - **手法セットと入力源は統一済み**（`RTBP / SinBP_D / SinBP_M`、`session_evaluation_input_filtered.csv` 共通）
 - **主要な一貫性ギャップは実装で是正済み**
-  - `map_pp_runtime` のコア列上書きをデフォルト抑止
+  - `map_pp_runtime` の固定係数再計算を評価系へ統一適用
+  - App実測列は `*_app_export` へ退避して共存
   - AROB追加補正をデフォルトOFF化し、CLIフラグで明示実行
 - 残る注意点は、`raw` 列の意味定義と、AROB補正ON runの解釈を混同しないこと

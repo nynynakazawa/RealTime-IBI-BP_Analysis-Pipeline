@@ -271,6 +271,16 @@ def add_pp_replay_candidates(session_frames: dict[str, pd.DataFrame]) -> PpRepla
     session_prediction_frames = {session_id: df.copy() for session_id, df in engineered_frames.items()}
     model_rows: list[dict[str, object]] = []
     session_ids = sorted(engineered_frames)
+    if len(session_ids) < 2:
+        # PP candidate replay uses cross-session training (leave-one-session-out style).
+        # For single-session runs, keep base frames unchanged and return diagnostics only.
+        return PpReplayOutputs(
+            session_frames=session_prediction_frames,
+            screening_df=screening_df.sort_values(["feature", "session_id"]).reset_index(drop=True),
+            culprit_df=culprit_df.sort_values("session_id").reset_index(drop=True),
+            model_coefficients_df=pd.DataFrame(model_rows),
+        )
+
     candidate_a_features = (*BASE_FEATURES, *ENGINEERED_FEATURES)
 
     for held_out_session in session_ids:

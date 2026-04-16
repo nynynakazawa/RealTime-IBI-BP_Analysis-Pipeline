@@ -285,31 +285,69 @@ def _ensure_identity_postprocessed_columns(
     return enriched
 
 
+def _backup_core_app_export_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep original app-export core columns for audit when runtime replay overwrites them."""
+    enriched = df.copy()
+    for spec in CORE_METHOD_SPECS:
+        prefix = spec["prefix"]
+        candidate_cols = (
+            spec["sbp_col"],
+            spec["dbp_col"],
+            spec["valid_col"],
+            spec["reject_col"],
+            f"{prefix}_SBP_raw",
+            f"{prefix}_DBP_raw",
+            f"{prefix}_MAP_raw",
+            f"{prefix}_PP_raw",
+            f"{prefix}_SBP_smoothed",
+            f"{prefix}_DBP_smoothed",
+            f"{prefix}_MAP_smoothed",
+            f"{prefix}_PP_smoothed",
+            f"{prefix}_SBP_calibrated",
+            f"{prefix}_DBP_calibrated",
+            f"{prefix}_MAP_calibrated",
+            f"{prefix}_PP_calibrated",
+            f"{prefix}_postprocess_applied",
+        )
+        for col in candidate_cols:
+            if col not in enriched.columns:
+                continue
+            backup_col = f"{col}_app_export"
+            if backup_col in enriched.columns:
+                continue
+            enriched[backup_col] = enriched[col]
+    return enriched
+
+
 def ensure_postprocessed_columns(merged_df: pd.DataFrame) -> pd.DataFrame:
+    # Recompute core MAP/PP series from the current fixed coefficients so that
+    # coefficient updates are reflected in offline evaluation and batch reruns.
+    # Original app-exported core columns are preserved as `*_app_export`.
+    enriched = _backup_core_app_export_columns(merged_df)
     enriched = append_runtime_map_pp_columns(
-        merged_df,
-        preserve_existing_core_columns=True,
+        enriched,
+        preserve_existing_core_columns=False,
         enable_tracking_blend_overrides=False,
     )
     for spec in ALL_METHOD_SPECS:
         required = {spec["sbp_col"], spec["dbp_col"], spec["valid_col"], spec["reject_col"]}
         if required.issubset(set(enriched.columns)):
-            precomputed_postprocessed = {
-                f"{spec['prefix']}_MAP_raw",
-                f"{spec['prefix']}_PP_raw",
-                f"{spec['prefix']}_MAP_smoothed",
-                f"{spec['prefix']}_PP_smoothed",
-                f"{spec['prefix']}_MAP_calibrated",
-                f"{spec['prefix']}_PP_calibrated",
-                f"{spec['prefix']}_SBP_smoothed",
-                f"{spec['prefix']}_DBP_smoothed",
-                f"{spec['prefix']}_SBP_calibrated",
-                f"{spec['prefix']}_DBP_calibrated",
-                f"{spec['prefix']}_postprocess_applied",
-            }
-            if precomputed_postprocessed.issubset(set(enriched.columns)):
-                continue
             if spec.get("already_smoothed"):
+                precomputed_postprocessed = {
+                    f"{spec['prefix']}_MAP_raw",
+                    f"{spec['prefix']}_PP_raw",
+                    f"{spec['prefix']}_MAP_smoothed",
+                    f"{spec['prefix']}_PP_smoothed",
+                    f"{spec['prefix']}_MAP_calibrated",
+                    f"{spec['prefix']}_PP_calibrated",
+                    f"{spec['prefix']}_SBP_smoothed",
+                    f"{spec['prefix']}_DBP_smoothed",
+                    f"{spec['prefix']}_SBP_calibrated",
+                    f"{spec['prefix']}_DBP_calibrated",
+                    f"{spec['prefix']}_postprocess_applied",
+                }
+                if precomputed_postprocessed.issubset(set(enriched.columns)):
+                    continue
                 enriched = _ensure_identity_postprocessed_columns(
                     enriched,
                     spec["prefix"],

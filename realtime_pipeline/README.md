@@ -12,6 +12,12 @@
 
 ```bash
 python3 Analysis/run_realtime_session.py --subject-id NY --session-number 1 --mode 1
+
+# 既存 session の evaluation だけ回し直す（default: past は除外）
+python3 Analysis/run_realtime_session.py --rerun-existing-evaluations
+
+# past 配下も含めて回し直す
+python3 Analysis/run_realtime_session.py --rerun-existing-evaluations --past
 ```
 
 出力先:

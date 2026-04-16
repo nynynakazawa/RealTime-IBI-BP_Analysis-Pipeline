@@ -15,6 +15,44 @@ def merged_csv_path(session_dir: Path) -> Path:
     return session_dir / f"{session_dir.name}_merged.csv"
 
 
+def list_realtime_session_dirs(
+    root: Path,
+    *,
+    include_past: bool = False,
+    require_artifacts: bool = False,
+) -> list[Path]:
+    if not root.exists():
+        return []
+
+    current_dirs: list[Path] = []
+    past_dirs: list[Path] = []
+    for path in sorted(root.iterdir()):
+        if not path.is_dir():
+            continue
+        if path.name == "past":
+            if include_past:
+                past_dirs = [past_path for past_path in sorted(path.iterdir()) if past_path.is_dir()]
+            continue
+        current_dirs.append(path)
+
+    known_names = {path.name for path in current_dirs}
+    candidates = list(current_dirs)
+    for path in past_dirs:
+        if path.name in known_names:
+            continue
+        candidates.append(path)
+        known_names.add(path.name)
+
+    if not require_artifacts:
+        return candidates
+
+    return [
+        session_dir
+        for session_dir in candidates
+        if merged_csv_path(session_dir).exists() or session_input_filtered_path(session_dir).exists()
+    ]
+
+
 def ensure_session_input_filtered(session_dir: Path, force_rebuild: bool = True) -> Path:
     filtered_path = session_input_filtered_path(session_dir)
     if not force_rebuild and filtered_path.exists() and filtered_path.stat().st_size > 0:

@@ -23,7 +23,18 @@ AROB 論文用の追従重視解析をここに分離する。
 実行:
 
 ```bash
+# 現行データのみ（default: realtime_sessions/past は除外）
 python3 Analysis/run_arob_tracking_analysis.py
+
+# 過去データも含める
+python3 Analysis/run_arob_tracking_analysis.py --past
+
+# 例: 特定セッションのみ
+python3 Analysis/run_arob_tracking_analysis.py --session-id jin_20260416_160710
+
+# 例: 特定セッション + past も探索対象に含める
+python3 Analysis/run_arob_tracking_analysis.py --session-id zawa_20260414_154020 --past
+
 python3 Analysis/run_arob_tracking_analysis.py --no-plots
 python3 Analysis/run_arob_tracking_analysis.py --output-root Analysis/Data/arob_tracking
 ```

@@ -32,6 +32,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable AROB-only window lag/sign/gain alignment after aggregation.",
     )
+    parser.add_argument(
+        "--session-id",
+        dest="session_ids",
+        action="append",
+        default=[],
+        help="Run only specific realtime session id(s). Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--past",
+        action="store_true",
+        help="Include sessions under Analysis/Data/realtime_sessions/past/ as well.",
+    )
     return parser.parse_args()
 
 
@@ -42,6 +54,8 @@ def main() -> int:
         make_plots=not args.no_plots,
         enable_tracking_projection=args.enable_tracking_projection,
         enable_window_lag_alignment=args.enable_window_lag_alignment,
+        include_past=args.past,
+        session_ids=tuple(args.session_ids) if args.session_ids else None,
     )
     print(f"output_dir={outputs.output_dir}")
     print(f"summary_csv={outputs.summary_path}")

@@ -440,8 +440,18 @@ def run_tracking_analysis(
     *,
     enable_tracking_projection: bool = False,
     enable_window_lag_alignment: bool = False,
+    include_past: bool = False,
+    session_ids: tuple[str, ...] | None = None,
 ) -> PipelineOutputs:
-    session_dirs = list_session_dirs()
+    session_dirs = list_session_dirs(include_past=include_past)
+    if session_ids:
+        requested = {session_id.strip() for session_id in session_ids if session_id and session_id.strip()}
+        session_dirs = [path for path in session_dirs if path.name in requested]
+        if not session_dirs:
+            raise RuntimeError(
+                "no requested realtime sessions were found for AROB tracking analysis: "
+                + ", ".join(sorted(requested))
+            )
     base_frames: dict[str, pd.DataFrame] = {}
     for session_dir in session_dirs:
         filtered = load_session_input_filtered(session_dir)
@@ -539,6 +549,7 @@ def run_tracking_analysis(
         "window_seconds": list(WINDOW_SECONDS),
         "session_count": len(session_dirs),
         "session_ids": [path.name for path in session_dirs],
+        "include_past": bool(include_past),
         "representative_session": representative_session,
         "plots_generated": bool(make_plots),
         "tracking_projection_enabled": bool(enable_tracking_projection),

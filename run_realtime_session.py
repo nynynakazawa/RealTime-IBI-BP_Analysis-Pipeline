@@ -30,6 +30,7 @@ from realtime_pipeline.evaluate_session import (
     write_session_report,
 )
 from realtime_pipeline.merge_session import merge_session_data
+from realtime_pipeline.session_filtered_input import list_realtime_session_dirs
 import pandas as pd
 
 
@@ -118,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
     # Baseline-family experimental repair flow is intentionally disabled in normal runs.
     parser.add_argument("--rerun-existing-evaluations", action="store_true")
     parser.add_argument("--target-session", default="")
+    parser.add_argument(
+        "--past",
+        action="store_true",
+        help="Include sessions under Analysis/Data/realtime_sessions/past/ when scanning existing sessions.",
+    )
     return parser
 
 
@@ -204,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.rerun_existing_evaluations:
         target_session = args.target_session.strip()
-        session_dirs = sorted(path for path in sessions_root.iterdir() if path.is_dir())
+        session_dirs = list_realtime_session_dirs(sessions_root, include_past=args.past, require_artifacts=False)
         rerun_count = 0
         for session_dir in session_dirs:
             session_id = session_dir.name

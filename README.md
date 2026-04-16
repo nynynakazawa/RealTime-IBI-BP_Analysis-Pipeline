@@ -31,6 +31,7 @@
 `realtime_sessions` の元データは消さず、そこから再計算する。
 `run_arob_tracking_analysis.py` を AROB 解析の単一エントリポイントとして扱い、
 個別の一時チューニングスクリプトは削除済み。
+default では `Data/realtime_sessions/past/` を除外し、`--past` 指定時のみ含める。
 
 ## 3. 係数探索・実験系
 
@@ -43,6 +44,7 @@
 
 この系は「試行錯誤の実験系」として扱う。
 論文の主結果に採用する前に、必ず `AROB/` で再評価する。
+こちらも default では `Data/realtime_sessions/past/` を除外し、`--past` 指定時のみ含める。
 
 ## Data 配下の扱い
 

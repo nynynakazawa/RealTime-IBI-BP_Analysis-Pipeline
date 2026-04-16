@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 from realtime_pipeline.session_filtered_input import (
     ensure_session_input_filtered,
+    list_realtime_session_dirs,
     session_input_filtered_path as shared_session_input_filtered_path,
 )
 
@@ -22,8 +23,8 @@ from .config import (
 )
 
 
-def list_session_dirs(root: Path = REALTIME_SESSIONS_ROOT) -> list[Path]:
-    return sorted(path for path in root.iterdir() if path.is_dir())
+def list_session_dirs(root: Path = REALTIME_SESSIONS_ROOT, *, include_past: bool = False) -> list[Path]:
+    return list_realtime_session_dirs(root, include_past=include_past, require_artifacts=True)
 
 
 def session_input_filtered_path(session_dir: Path) -> Path:

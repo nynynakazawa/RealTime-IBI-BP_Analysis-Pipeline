@@ -10,7 +10,11 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from realtime_pipeline.session_filtered_input import ensure_session_input_filtered, session_input_filtered_path
+from realtime_pipeline.session_filtered_input import (
+    ensure_session_input_filtered,
+    list_realtime_session_dirs,
+    session_input_filtered_path,
+)
 try:
     from .baseline_experiments_config import ENABLE_BASELINE_EXPERIMENTS_DEFAULT
 except ImportError:
@@ -387,20 +391,15 @@ def _load_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
-def _session_dirs(root: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in root.iterdir()
-        if path.is_dir()
-        and ((path / f"{path.name}_merged.csv").exists() or session_input_filtered_path(path).exists())
-    )
+def _session_dirs(root: Path, *, include_past: bool = False) -> list[Path]:
+    return list_realtime_session_dirs(root, include_past=include_past, require_artifacts=True)
 
 
-def load_reference_rows(sessions_root: Path) -> list[dict[str, str]]:
+def load_reference_rows(sessions_root: Path, *, include_past: bool = False) -> list[dict[str, str]]:
     # Single source of truth for preprocessing:
     # use the same beat-level filtered table as realtime session evaluation and AROB.
     reference_rows: list[dict[str, str]] = []
-    for session_dir in _session_dirs(sessions_root):
+    for session_dir in _session_dirs(sessions_root, include_past=include_past):
         filtered_csv = ensure_session_input_filtered(session_dir)
         rows = _load_csv(filtered_csv)
         for row_index, row in enumerate(rows):
@@ -1595,7 +1594,13 @@ def generate_all_scatter_plots(prediction_rows: list[dict[str, object]], output_
     return outputs
 
 
-def coefficients_payload(models: FittedModels, sessions_root: Path, ridge_alpha: float) -> dict[str, object]:
+def coefficients_payload(
+    models: FittedModels,
+    sessions_root: Path,
+    ridge_alpha: float,
+    *,
+    include_past: bool = False,
+) -> dict[str, object]:
     rtbp_pp = _apply_pp_term_scales(models.rtbp_pp, RTBP_TERM_LABELS, models.rtbp_pp_term_scales)
     sinbpd_combined_pp = _apply_pp_term_scales(
         models.sinbpd_combined_pp,
@@ -1610,6 +1615,7 @@ def coefficients_payload(models: FittedModels, sessions_root: Path, ridge_alpha:
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "sessions_root": str(sessions_root),
+        "include_past": bool(include_past),
         "ridge_alpha": ridge_alpha,
         "note": "CNAP is used only as offline training/evaluation labels. Runtime app uses these fixed coefficients and does not read CNAP values.",
         "alpha_map": ALPHA_MAP,
@@ -1698,6 +1704,11 @@ def main() -> int:
         type=Path,
         default=Path(__file__).resolve().parents[1] / "Data" / "realtime_coefficient",
     )
+    parser.add_argument(
+        "--past",
+        action="store_true",
+        help="Include sessions under Analysis/Data/realtime_sessions/past/ as well.",
+    )
     parser.add_argument("--ridge-alpha", type=float, default=DEFAULT_RIDGE_ALPHA)
     parser.add_argument("--baseline-ridge-alpha", type=float, default=DEFAULT_BASELINE_RIDGE_ALPHA)
     parser.add_argument("--rich-baseline-ridge-alpha", type=float, default=DEFAULT_RICH_BASELINE_RIDGE_ALPHA)
@@ -1712,7 +1723,7 @@ def main() -> int:
     args = parser.parse_args()
     enable_baseline_experiments = bool(args.enable_baseline_experiments or ENABLE_BASELINE_EXPERIMENTS_DEFAULT)
 
-    rows = load_reference_rows(args.sessions_root)
+    rows = load_reference_rows(args.sessions_root, include_past=args.past)
     if not rows:
         raise SystemExit("no usable reference rows found")
     samples_by_method = {
@@ -1924,7 +1935,12 @@ def main() -> int:
         )
     session_style_summary = build_session_style_summary(session_style_groups)
 
-    payload = coefficients_payload(models, args.sessions_root, args.ridge_alpha)
+    payload = coefficients_payload(
+        models,
+        args.sessions_root,
+        args.ridge_alpha,
+        include_past=args.past,
+    )
     payload["sessions"] = sessions
     payload["sample_counts"] = {
         method: len(samples_by_method.get(method, [])) for method in METHOD_ORDER
@@ -2024,6 +2040,7 @@ def main() -> int:
         "# Realtime Coefficient Report",
         "",
         f"- sessions_root: {args.sessions_root}",
+        f"- include_past: {bool(args.past)}",
         f"- ridge_alpha: {args.ridge_alpha}",
         f"- baseline_ridge_alpha: {args.baseline_ridge_alpha}",
         f"- rich_baseline_ridge_alpha: {args.rich_baseline_ridge_alpha}",
