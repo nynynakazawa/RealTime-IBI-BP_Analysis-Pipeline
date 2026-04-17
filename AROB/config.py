@@ -146,10 +146,15 @@ SUPPLEMENTAL_METHOD_SPECS: tuple[MethodSpec, ...] = ()
 # exclude them from the default AROB tracking run.
 # Active comparison series are intentionally limited to:
 # RTBP / SinBP_M / SinBP_D.
-METHOD_SPECS: tuple[MethodSpec, ...] = CORE_METHOD_SPECS + SUPPLEMENTAL_METHOD_SPECS
+METHOD_SPECS: tuple[MethodSpec, ...] = CORE_METHOD_SPECS + DIAGNOSTIC_METHOD_SPECS + SUPPLEMENTAL_METHOD_SPECS
 METHOD_SPEC_BY_NAME: dict[str, MethodSpec] = {spec.name: spec for spec in METHOD_SPECS}
 PAPER_METHOD_SPECS: tuple[MethodSpec, ...] = tuple(METHOD_SPEC_BY_NAME[name] for name in PAPER_METHOD_NAMES)
 PAPER_CORE_METHOD_SPECS: tuple[MethodSpec, ...] = tuple(METHOD_SPEC_BY_NAME[name] for name in PAPER_CORE_METHOD_NAMES)
 PAPER_SUPPLEMENTAL_METHOD_SPECS: tuple[MethodSpec, ...] = tuple(
     METHOD_SPEC_BY_NAME[name] for name in PAPER_SUPPLEMENTAL_METHOD_NAMES
 )
+
+
+def get_method_specs(method_names: tuple[str, ...] | None = None) -> tuple[MethodSpec, ...]:
+    names = method_names or PAPER_METHOD_NAMES
+    return tuple(METHOD_SPEC_BY_NAME[name] for name in names)

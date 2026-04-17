@@ -16,8 +16,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from current_direction import PAPER_METHOD_NAMES
-
 from .config import PRIMARY_WINDOW_SECONDS
 
 
@@ -26,10 +24,11 @@ def _method_colors() -> dict[str, str]:
         "RTBP": "#1f77b4",
         "SinBP_M": "#2ca02c",
         "SinBP_D": "#d62728",
+        "SinBP_D_EOnly": "#ff7f0e",
     }
 
 
-def plot_metric_boxplots(metrics_df: pd.DataFrame, output_dir: Path) -> None:
+def plot_metric_boxplots(metrics_df: pd.DataFrame, output_dir: Path, method_names: tuple[str, ...]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     colors = _method_colors()
     metrics = [
@@ -40,7 +39,7 @@ def plot_metric_boxplots(metrics_df: pd.DataFrame, output_dir: Path) -> None:
     for target in ("SBP", "DBP", "PP"):
         for metric_key, metric_label in metrics:
             plt.figure(figsize=(8.0, 4.8))
-            subset = metrics_df[(metrics_df["target"] == target) & (metrics_df["method"].isin(PAPER_METHOD_NAMES))].copy()
+            subset = metrics_df[(metrics_df["target"] == target) & (metrics_df["method"].isin(method_names))].copy()
             windows = sorted(subset["window_seconds"].unique())
             for idx, window_seconds in enumerate(windows):
                 window_subset = subset[subset["window_seconds"] == window_seconds]
@@ -63,7 +62,7 @@ def plot_metric_boxplots(metrics_df: pd.DataFrame, output_dir: Path) -> None:
             plt.ylabel(metric_label)
             handles = [
                 plt.Line2D([0], [0], color=colors.get(method, "#999999"), lw=8, label=method)
-                for method in PAPER_METHOD_NAMES
+                for method in method_names
             ]
             plt.legend(handles=handles, loc="best")
             plt.tight_layout()
@@ -78,12 +77,12 @@ def plot_window_sensitivity(summary_df: pd.DataFrame, output_dir: Path) -> None:
     return None
 
 
-def plot_delta_scatter(centered_df: pd.DataFrame, output_dir: Path) -> None:
+def plot_delta_scatter(centered_df: pd.DataFrame, output_dir: Path, method_names: tuple[str, ...]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     if centered_df.empty:
         return None
     colors = _method_colors()
-    methods = [method for method in PAPER_METHOD_NAMES if method in set(centered_df["method"].unique())]
+    methods = [method for method in method_names if method in set(centered_df["method"].unique())]
     if not methods:
         return None
     for target in ("SBP", "DBP", "PP"):
@@ -138,6 +137,7 @@ def plot_delta_scatter(centered_df: pd.DataFrame, output_dir: Path) -> None:
 def plot_subject_sessions(
     centered_df: pd.DataFrame,
     output_dir: Path,
+    method_names: tuple[str, ...],
     representative_session: str | None = None,
 ) -> str | None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +163,7 @@ def plot_subject_sessions(
                 (centered_df["session_id"] == session_id)
                 & (centered_df["window_seconds"] == PRIMARY_WINDOW_SECONDS)
                 & (centered_df["target"] == target)
-                & (centered_df["method"].isin(PAPER_METHOD_NAMES))
+                & (centered_df["method"].isin(method_names))
             ].copy()
             if subset.empty:
                 continue

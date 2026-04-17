@@ -44,11 +44,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Include sessions under Analysis/Data/realtime_sessions/past/ as well.",
     )
+    parser.add_argument(
+        "--include-eonly",
+        action="store_true",
+        help="Add SinBP_D_EOnly as an ablation series alongside the default paper methods.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    method_names = PAPER_METHOD_NAMES + (("SinBP_D_EOnly",) if args.include_eonly else ())
     outputs = run_tracking_analysis(
         output_root=args.output_root,
         make_plots=not args.no_plots,
@@ -56,6 +62,7 @@ def main() -> int:
         enable_window_lag_alignment=args.enable_window_lag_alignment,
         include_past=args.past,
         session_ids=tuple(args.session_ids) if args.session_ids else None,
+        method_names=method_names,
     )
     print(f"output_dir={outputs.output_dir}")
     print(f"summary_csv={outputs.summary_path}")

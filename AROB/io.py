@@ -12,7 +12,7 @@ from realtime_pipeline.session_filtered_input import (
 from .config import (
     ARTIFACT_COL,
     BEAT_COL,
-    METHOD_SPECS,
+    MethodSpec,
     REF_MAP_COL,
     REF_PP_COL,
     REALTIME_SESSIONS_ROOT,
@@ -31,7 +31,7 @@ def session_input_filtered_path(session_dir: Path) -> Path:
     return shared_session_input_filtered_path(session_dir)
 
 
-def load_session_input_filtered(session_dir: Path) -> pd.DataFrame:
+def load_session_input_filtered(session_dir: Path, method_specs: tuple[MethodSpec, ...]) -> pd.DataFrame:
     usecols = {
         SESSION_COL,
         BEAT_COL,
@@ -54,7 +54,7 @@ def load_session_input_filtered(session_dir: Path) -> pd.DataFrame:
         "M2_systole_ratio",
         "M2_diastole_ratio",
     }
-    for spec in METHOD_SPECS:
+    for spec in method_specs:
         usecols.add(spec.sbp_col)
         usecols.add(spec.dbp_col)
         usecols.add(spec.map_col)
@@ -71,12 +71,12 @@ def load_session_input_filtered(session_dir: Path) -> pd.DataFrame:
     return df
 
 
-def build_long_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def build_long_dataframe(df: pd.DataFrame, method_specs: tuple[MethodSpec, ...]) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
     common = df[
         [SESSION_COL, BEAT_COL, TIME_COL, REF_SBP_COL, REF_DBP_COL, REF_MAP_COL, REF_PP_COL, ARTIFACT_COL]
     ].copy()
-    for spec in METHOD_SPECS:
+    for spec in method_specs:
         required = {spec.sbp_col, spec.dbp_col, spec.map_col, spec.pp_col}
         if not required.issubset(df.columns):
             continue

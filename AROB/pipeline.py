@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import OUTPUT_ROOT, PAPER_METHOD_NAMES, PRIMARY_WINDOW_SECONDS, WINDOW_SECONDS
+from .config import OUTPUT_ROOT, PAPER_METHOD_NAMES, PRIMARY_WINDOW_SECONDS, WINDOW_SECONDS, get_method_specs
 from .io import build_long_dataframe, list_session_dirs, load_session_input_filtered
 from .metrics import compute_centered_metrics, summarize_metrics
 from .plots import plot_delta_scatter, plot_metric_boxplots, plot_subject_sessions, plot_window_sensitivity
@@ -442,7 +442,10 @@ def run_tracking_analysis(
     enable_window_lag_alignment: bool = False,
     include_past: bool = False,
     session_ids: tuple[str, ...] | None = None,
+    method_names: tuple[str, ...] | None = None,
 ) -> PipelineOutputs:
+    selected_method_names = method_names or PAPER_METHOD_NAMES
+    method_specs = get_method_specs(selected_method_names)
     session_dirs = list_session_dirs(include_past=include_past)
     if session_ids:
         requested = {session_id.strip() for session_id in session_ids if session_id and session_id.strip()}
@@ -454,7 +457,7 @@ def run_tracking_analysis(
             )
     base_frames: dict[str, pd.DataFrame] = {}
     for session_dir in session_dirs:
-        filtered = load_session_input_filtered(session_dir)
+        filtered = load_session_input_filtered(session_dir, method_specs)
         if not filtered.empty:
             base_frames[session_dir.name] = filtered
     if not base_frames:
@@ -464,7 +467,7 @@ def run_tracking_analysis(
 
     rows: list[pd.DataFrame] = []
     for session_id, filtered in pp_replay_outputs.session_frames.items():
-        long_df = build_long_dataframe(filtered)
+        long_df = build_long_dataframe(filtered, method_specs)
         if not long_df.empty:
             rows.append(long_df)
     if not rows:
@@ -495,7 +498,7 @@ def run_tracking_analysis(
     centered_df = pd.concat(centered_frames, ignore_index=True)
     summary_df = summarize_metrics(per_session_metrics_df)
 
-    paper_methods = set(PAPER_METHOD_NAMES)
+    paper_methods = set(selected_method_names)
     per_window_paper_df = per_window_df[per_window_df["method"].isin(paper_methods)].copy()
     per_session_metrics_paper_df = per_session_metrics_df[per_session_metrics_df["method"].isin(paper_methods)].copy()
     centered_paper_df = centered_df[centered_df["method"].isin(paper_methods)].copy()
@@ -539,10 +542,10 @@ def run_tracking_analysis(
 
     representative_session = _select_representative_session(centered_paper_df)
     if make_plots:
-        plot_metric_boxplots(per_session_metrics_paper_df, plots_dir)
-        plot_delta_scatter(centered_paper_df, plots_dir)
+        plot_metric_boxplots(per_session_metrics_paper_df, plots_dir, selected_method_names)
+        plot_delta_scatter(centered_paper_df, plots_dir, selected_method_names)
         plot_window_sensitivity(summary_paper_df, plots_dir)
-        plot_subject_sessions(centered_paper_df, plots_dir, representative_session=representative_session)
+        plot_subject_sessions(centered_paper_df, plots_dir, selected_method_names, representative_session=representative_session)
 
     metadata = {
         "primary_window_seconds": PRIMARY_WINDOW_SECONDS,
@@ -554,7 +557,7 @@ def run_tracking_analysis(
         "plots_generated": bool(make_plots),
         "tracking_projection_enabled": bool(enable_tracking_projection),
         "window_lag_alignment_enabled": bool(enable_window_lag_alignment),
-        "paper_methods": list(PAPER_METHOD_NAMES),
+        "paper_methods": list(selected_method_names),
         "full_summary_csv": str(summary_all_path),
         "pp_component_summary": str(pp_summary_path),
         "pp_term_diagnostics": str(pp_term_path),
@@ -563,7 +566,7 @@ def run_tracking_analysis(
         "pp_feature_culprits": str(pp_feature_paths["pp_feature_culprits"]),
         "pp_feature_candidate_coefficients": str(pp_feature_paths["pp_feature_candidate_coefficients"]),
     }
-    write_markdown_report(report_path, summary_paper_df, representative_session, metadata)
+    write_markdown_report(report_path, summary_paper_df, representative_session, metadata, selected_method_names)
     write_metadata(metadata_path, metadata)
 
     return PipelineOutputs(

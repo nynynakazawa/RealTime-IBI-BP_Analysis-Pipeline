@@ -5,8 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from current_direction import PAPER_CORE_METHOD_NAMES, PAPER_SUPPLEMENTAL_METHOD_NAMES
-
 from .config import PRIMARY_WINDOW_SECONDS
 
 
@@ -15,6 +13,7 @@ def write_markdown_report(
     summary_df: pd.DataFrame,
     representative_session: str | None,
     metadata: dict[str, object],
+    method_names: tuple[str, ...],
 ) -> None:
     primary = summary_df[summary_df["window_seconds"] == PRIMARY_WINDOW_SECONDS].copy()
     lines: list[str] = []
@@ -23,8 +22,7 @@ def write_markdown_report(
     lines.append(f"- primary_window_seconds: {PRIMARY_WINDOW_SECONDS}")
     lines.append(f"- session_count: {metadata['session_count']}")
     lines.append(f"- representative_session: {representative_session or 'n/a'}")
-    lines.append(f"- paper_core_methods: {', '.join(PAPER_CORE_METHOD_NAMES)}")
-    lines.append(f"- paper_supplemental_methods: {', '.join(PAPER_SUPPLEMENTAL_METHOD_NAMES)}")
+    lines.append(f"- methods: {', '.join(method_names)}")
     lines.append("")
     for target in ("SBP", "DBP", "PP"):
         target_df = primary[primary["target"] == target].sort_values("mean_centered_mae")
